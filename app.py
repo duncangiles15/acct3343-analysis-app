@@ -9,7 +9,7 @@ import streamlit as st
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -22,17 +22,16 @@ DATA_FILE = Path(__file__).parent / "universe.csv"
 
 
 # ============================================================
-# DATA LOADING AND CLEANING
+# 2. DATA LOADING AND CLEANING
 # ============================================================
 
 @st.cache_data
 def load_data(file_path: str, modified_time: float) -> pd.DataFrame:
-    """Load the local universe CSV and normalize its columns."""
+    """Load and normalize the source dataset."""
 
     df = pd.read_csv(file_path)
 
-    # Prevent duplicate source column names from creating
-    # duplicate-column errors later in Streamlit.
+    # Remove duplicate source columns.
     df = df.loc[:, ~df.columns.duplicated()].copy()
 
     required_columns = [
@@ -69,7 +68,6 @@ def load_data(file_path: str, modified_time: float) -> pd.DataFrame:
         if column not in df.columns:
             df[column] = np.nan
 
-    # Convert numeric columns while preserving genuinely missing values.
     numeric_columns = [
         "Rank",
         "Price",
@@ -100,20 +98,22 @@ def load_data(file_path: str, modified_time: float) -> pd.DataFrame:
         df["Ticker_guess"],
     )
 
-    df["Display_Ticker"] = df["Display_Ticker"].fillna("").astype(str)
-
-    # If the preferred ticker fields are empty, use the company name
-    # as a final identifier rather than inventing a ticker.
-    df["Display_Ticker"] = df["Display_Ticker"].where(
-        df["Display_Ticker"].str.strip().ne(""),
-        df["Name"].fillna("Unknown company").astype(str),
+    df["Display_Ticker"] = (
+        df["Display_Ticker"].fillna("").astype(str).str.strip()
     )
 
+    # Use company name as a fallback identifier if ticker data is absent.
     df["Name"] = df["Name"].fillna("Unknown company").astype(str)
+
+    df["Display_Ticker"] = df["Display_Ticker"].where(
+        df["Display_Ticker"].ne(""),
+        df["Name"],
+    )
+
     df["Market Cap"] = df["Market Cap"].fillna("").astype(str)
 
-    # Parse market capitalization strings such as:
-    # $2.4T, $850B, $45.2M, or numeric values.
+    # Convert market-cap strings such as $2.4T, $850B, and $45.2M
+    # into numeric dollar values.
     def parse_market_cap(value):
         if pd.isna(value):
             return np.nan
@@ -151,7 +151,7 @@ def load_data(file_path: str, modified_time: float) -> pd.DataFrame:
 
     df["Market_Cap_Value"] = df["Market Cap"].apply(parse_market_cap)
 
-    # Use the ticker as a stable sorting key.
+    # Deterministic secondary sorting key.
     df["Sort_Ticker"] = df["Display_Ticker"].astype(str).str.upper()
 
     return df
@@ -160,7 +160,7 @@ def load_data(file_path: str, modified_time: float) -> pd.DataFrame:
 if not DATA_FILE.exists():
     st.error(
         "The file `universe.csv` was not found. "
-        "Place it in the same GitHub repository directory as `app.py`."
+        "Place it in the same repository directory as `app.py`."
     )
     st.stop()
 
@@ -176,7 +176,7 @@ if data.empty:
 
 
 # ============================================================
-# FINANCIAL METRIC AND DISPLAY HELPERS
+# 3. METRIC SCORES AND DISPLAY HELPERS
 # ============================================================
 
 def add_quality_scores(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,35 +188,36 @@ def add_quality_scores(df: pd.DataFrame) -> pd.DataFrame:
     Lower SNOA is preferred.
     Higher gross profitability is preferred.
 
-    The composite is calculated only when all four raw metrics
-    are available for a company.
+    The composite score requires all four metrics.
     """
 
     result = df.copy()
 
-    metric_columns = [
-        "Altman_Z",
-        "STA",
-        "SNOA",
-        "Gross_Profitability",
-    ]
-
-    # Each percentile score runs from 0 to 100.
-    # A higher score means a more favourable relative position.
     result["Altman_Score"] = (
         result["Altman_Z"].rank(method="average", pct=True) * 100
     )
 
     result["STA_Score"] = (
-        result["STA"].rank(method="average", pct=True, ascending=False) * 100
+        result["STA"].rank(
+            method="average",
+            pct=True,
+            ascending=False,
+        ) * 100
     )
 
     result["SNOA_Score"] = (
-        result["SNOA"].rank(method="average", pct=True, ascending=False) * 100
+        result["SNOA"].rank(
+            method="average",
+            pct=True,
+            ascending=False,
+        ) * 100
     )
 
     result["GP_Score"] = (
-        result["Gross_Profitability"].rank(method="average", pct=True) * 100
+        result["Gross_Profitability"].rank(
+            method="average",
+            pct=True,
+        ) * 100
     )
 
     score_columns = [
@@ -226,10 +227,17 @@ def add_quality_scores(df: pd.DataFrame) -> pd.DataFrame:
         "GP_Score",
     ]
 
-    # Do not treat missing data as a zero score.
+    metric_columns = [
+        "Altman_Z",
+        "STA",
+        "SNOA",
+        "Gross_Profitability",
+    ]
+
     complete_metrics = result[metric_columns].notna().all(axis=1)
 
     result["Quality_Score"] = np.nan
+
     result.loc[complete_metrics, "Quality_Score"] = (
         result.loc[complete_metrics, score_columns].mean(axis=1)
     )
@@ -242,12 +250,7 @@ def stable_sort(
     metric: str,
     ascending: bool,
 ) -> pd.DataFrame:
-    """
-    Sort by the requested metric and then ticker.
-
-    The ticker is a deterministic secondary key when equal metric
-    values fall across a retention boundary.
-    """
+    """Sort by the screening metric, using ticker as a tie-breaker."""
 
     return df.sort_values(
         by=[metric, "Sort_Ticker"],
@@ -255,30 +258,6 @@ def stable_sort(
         kind="mergesort",
         na_position="last",
     ).copy()
-
-
-def format_market_cap(value):
-    if pd.isna(value):
-        return "—"
-
-    value = float(value)
-
-    if abs(value) >= 1_000_000_000_000:
-        return f"${value / 1_000_000_000_000:,.2f}T"
-    if abs(value) >= 1_000_000_000:
-        return f"${value / 1_000_000_000:,.2f}B"
-    if abs(value) >= 1_000_000:
-        return f"${value / 1_000_000:,.1f}M"
-    if abs(value) >= 1_000:
-        return f"${value / 1_000:,.1f}K"
-
-    return f"${value:,.0f}"
-
-
-def format_ratio_as_percent(series: pd.Series) -> pd.Series:
-    """Convert stored decimal ratios to percentage display values."""
-
-    return series * 100
 
 
 def prepare_display_table(
@@ -313,32 +292,32 @@ def prepare_display_table(
     available_columns = [column for column in columns if column in df.columns]
     table = df[available_columns].copy()
 
-    rename_map = {
-        "Display_Ticker": "Ticker",
-        "Name": "Company",
-        "Country": "Country",
-        "Market Cap": "Market Cap",
-        "Price": "Price",
-        "Altman_Z": "Altman Z",
-        "STA": "STA (%)",
-        "SNOA": "SNOA (%)",
-        "Gross_Profitability": "Gross Profitability (%)",
-        "Altman_Score": "Altman Z Percentile",
-        "STA_Score": "STA Percentile",
-        "SNOA_Score": "SNOA Percentile",
-        "GP_Score": "Gross Profitability Percentile",
-        "Quality_Score": "Composite Score",
-    }
+    table = table.rename(
+        columns={
+            "Display_Ticker": "Ticker",
+            "Name": "Company",
+            "Altman_Z": "Altman Z",
+            "STA": "STA (%)",
+            "SNOA": "SNOA (%)",
+            "Gross_Profitability": "Gross Profitability (%)",
+            "Altman_Score": "Altman Z Percentile",
+            "STA_Score": "STA Percentile",
+            "SNOA_Score": "SNOA Percentile",
+            "GP_Score": "Gross Profitability Percentile",
+            "Quality_Score": "Composite Score",
+        }
+    )
 
-    table = table.rename(columns=rename_map)
-
-    # Display ratios as percentages, but retain raw decimal values
-    # in the underlying dataset and calculations.
-    for column in ["STA (%)", "SNOA (%)", "Gross Profitability (%)"]:
+    # Source ratios are stored as decimals. Convert only for display.
+    for column in [
+        "STA (%)",
+        "SNOA (%)",
+        "Gross Profitability (%)",
+    ]:
         if column in table.columns:
-            table[column] = format_ratio_as_percent(table[column])
+            table[column] = table[column] * 100
 
-    numeric_display_columns = [
+    numeric_columns = [
         "Price",
         "Altman Z",
         "STA (%)",
@@ -351,11 +330,13 @@ def prepare_display_table(
         "Composite Score",
     ]
 
-    for column in numeric_display_columns:
+    for column in numeric_columns:
         if column in table.columns:
-            table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
+            table[column] = pd.to_numeric(
+                table[column], errors="coerce"
+            ).round(2)
 
-    # Final protection against duplicate display names.
+    # Final safeguard against duplicate display column names.
     table = table.loc[:, ~table.columns.duplicated()]
 
     return table
@@ -387,7 +368,7 @@ def retention_filter(
     Apply a rank-based retention filter.
 
     Missing observations are removed first and counted separately.
-    The number retained is floor(valid observations × retention rate).
+    The retained count is floor(valid observations × retention rate).
     """
 
     entering_count = len(entering_df)
@@ -397,7 +378,9 @@ def retention_filter(
 
     ordered = stable_sort(valid, metric, ascending=ascending)
 
-    keep_count = math.floor(len(ordered) * retention_percent / 100)
+    keep_count = math.floor(
+        len(ordered) * retention_percent / 100
+    )
     keep_count = max(0, min(keep_count, len(ordered)))
 
     survivors = ordered.head(keep_count).copy()
@@ -425,37 +408,67 @@ def retention_filter(
     return survivors, summary, cutoff
 
 
+# ============================================================
+# 4. CUTOFF DETAILS — FIXED FOR BOTH THRESHOLD AND RANK FILTERS
+# ============================================================
+
 def show_cutoff_details(
     title: str,
     cutoff: dict,
     display_metric: str,
     unit: str = "",
 ):
-    """Show the observations nearest the rank-retention boundary."""
+    """
+    Display cutoff information for both:
+    - Altman Z's fixed numerical threshold.
+    - STA, SNOA, and gross profitability's rank-based filters.
+
+    The Altman Z dictionary does not contain valid_count,
+    keep_count, or excluded_count. Those counts are derived from
+    its survivor and excluded tables instead.
+    """
 
     with st.expander(title):
-        valid_count = cutoff["valid_count"]
-        keep_count = cutoff["keep_count"]
-        excluded_count = cutoff["excluded_count"]
+        survivors = cutoff["survivors"]
+        excluded = cutoff["excluded"]
+
+        # Rank-based filters store these counts directly.
+        if "valid_count" in cutoff:
+            valid_count = cutoff["valid_count"]
+            keep_count = cutoff["keep_count"]
+            excluded_count = cutoff["excluded_count"]
+
+        # Altman Z uses a fixed threshold and stores different fields.
+        else:
+            valid_count = len(survivors) + len(excluded)
+            keep_count = len(survivors)
+            excluded_count = len(excluded)
 
         st.write(
             f"**Valid observations:** {valid_count:,}  \n"
-            f"**Target retained:** {keep_count:,}  \n"
-            f"**Excluded after ranking:** {excluded_count:,}"
+            f"**Retained:** {keep_count:,}  \n"
+            f"**Excluded after screening:** {excluded_count:,}"
         )
+
+        if "threshold" in cutoff:
+            st.write(
+                f"**Altman Z threshold:** {cutoff['threshold']:.2f}"
+            )
+
+            st.caption(
+                "Companies below the selected Altman Z threshold are "
+                "excluded. Companies with missing Altman Z values are "
+                "reported separately in the funnel summary."
+            )
 
         if valid_count == 0:
             st.info("No valid observations were available at this stage.")
             return
 
-        survivors = cutoff["survivors"]
-        excluded = cutoff["excluded"]
-
         if survivors.empty:
             st.warning(
-                "No observations were retained. The current retention "
-                "percentage and number of valid observations result in "
-                "a floor-based target of zero."
+                "No observations were retained at this stage. "
+                "Review the current screening settings."
             )
             return
 
@@ -463,16 +476,34 @@ def show_cutoff_details(
             st.info("All valid observations were retained.")
             return
 
-        # The last excluded and first retained observations are the
-        # companies immediately on either side of the cutoff.
-        last_excluded = excluded.tail(1)
-        first_retained = survivors.tail(1)
+        # For Altman Z, the closest excluded observation is the highest
+        # excluded Z-score; the closest retained is the lowest passing
+        # Z-score.
+        if "threshold" in cutoff:
+            excluded_row = excluded.sort_values(
+                "Altman_Z",
+                ascending=False,
+                kind="mergesort",
+            ).head(1)
 
-        excluded_value = last_excluded.iloc[0][cutoff["metric"]]
-        retained_value = first_retained.iloc[0][cutoff["metric"]]
+            retained_row = survivors.sort_values(
+                "Altman_Z",
+                ascending=True,
+                kind="mergesort",
+            ).head(1)
 
-        excluded_ticker = last_excluded.iloc[0]["Display_Ticker"]
-        retained_ticker = first_retained.iloc[0]["Display_Ticker"]
+        # For rank-based filters, the survivors and excluded rows are
+        # already sorted in the order used for the retention decision.
+        else:
+            excluded_row = excluded.tail(1)
+            retained_row = survivors.tail(1)
+
+        excluded_value = float(
+            excluded_row.iloc[0][cutoff["metric"]]
+        )
+        retained_value = float(
+            retained_row.iloc[0][cutoff["metric"]]
+        )
 
         if unit == "%":
             excluded_value *= 100
@@ -481,35 +512,39 @@ def show_cutoff_details(
         left, right = st.columns(2)
 
         with left:
-            st.markdown("**Last company excluded**")
-            st.write(f"**{excluded_ticker}**")
+            st.markdown("**Closest excluded observation**")
+            st.write(
+                f"**{excluded_row.iloc[0]['Display_Ticker']}**"
+            )
             st.write(
                 f"{display_metric}: {excluded_value:,.2f}{unit}"
             )
 
         with right:
-            st.markdown("**Last company retained**")
-            st.write(f"**{retained_ticker}**")
+            st.markdown("**Closest retained observation**")
+            st.write(
+                f"**{retained_row.iloc[0]['Display_Ticker']}**"
+            )
             st.write(
                 f"{display_metric}: {retained_value:,.2f}{unit}"
             )
 
         st.caption(
-            "Companies are ordered by the screening metric. "
-            "Ticker is used as the secondary sort key, so the result "
-            "is reproducible when values tie at the cutoff."
+            "For rank-based filters, ticker is the secondary sorting key "
+            "when metric values tie at the cutoff. Altman Z uses a fixed "
+            "numerical threshold instead."
         )
 
 
 # ============================================================
-# CALCULATE PERCENTILE SCORES
+# 5. CALCULATE PERCENTILE SCORES
 # ============================================================
 
 data = add_quality_scores(data)
 
 
 # ============================================================
-# HEADER AND METHODOLOGY NAVIGATION
+# 6. PAGE HEADER AND METHODOLOGY LINK
 # ============================================================
 
 st.title("Manufacturing Stock Screener")
@@ -517,34 +552,31 @@ st.title("Manufacturing Stock Screener")
 st.markdown(
     """
     A quantitative screening dashboard for manufacturing companies.
-    The funnel applies financial filters in sequence, while the
-    composite score compares companies on four financial measures.
+    The funnel applies financial filters sequentially, while the
+    composite score compares companies across four financial measures.
     """
 )
 
 st.markdown(
-    """
-    **Quick navigation:** [View methodology, formulas and screening rules ↓](#methodology)
-    """
+    "**Quick navigation:** [Methodology, formulas and screening rules ↓](#methodology)"
 )
 
 st.caption(
     "Data source: the repository's `universe.csv` file. "
-    "The screen is a quantitative research tool, not investment advice."
+    "This dashboard is a quantitative research tool, not investment advice."
 )
 
 
 # ============================================================
-# SIDEBAR: FUNNEL CONTROL
+# 7. SIDEBAR: FUNNEL CONTROL
 # ============================================================
 
 st.sidebar.title("Funnel Control")
 
 st.sidebar.markdown(
     """
-    Adjust the settings below to change which companies pass through
-    the screening funnel. Each stage starts with the companies that
-    survived the preceding stage.
+    Adjust the settings to change which companies pass through the funnel.
+    Each filter is applied to the companies that survived the preceding stage.
     """
 )
 
@@ -556,7 +588,7 @@ market_cap_min_billions = st.sidebar.number_input(
     step=0.5,
     help=(
         "Companies below this market capitalization are removed before "
-        "the financial filters begin. For example, 0.5 means $500 million."
+        "the financial filters. For example, 0.5 means $500 million."
     ),
 )
 
@@ -567,9 +599,9 @@ altman_threshold = st.sidebar.number_input(
     value=1.81,
     step=0.01,
     help=(
-        "Companies with an Altman Z-score below this value are excluded. "
-        "For manufacturing firms, 1.81 is a commonly cited distress-zone "
-        "boundary."
+        "Companies with Altman Z below this value are excluded. "
+        "For manufacturing companies, 1.81 is a commonly cited "
+        "distress-zone boundary."
     ),
 )
 
@@ -583,9 +615,8 @@ sta_retention = st.sidebar.slider(
     value=50,
     step=5,
     help=(
-        "The percentage of companies with valid STA values kept at this "
-        "stage. Lower STA values are preferred because they indicate "
-        "lower accruals relative to assets under this screening approach."
+        "Percentage of valid STA observations retained at this stage. "
+        "Lower STA values are preferred by this screening method."
     ),
 )
 
@@ -596,8 +627,8 @@ snoa_retention = st.sidebar.slider(
     value=50,
     step=5,
     help=(
-        "The percentage of companies with valid SNOA values kept at this "
-        "stage. Lower SNOA values are preferred."
+        "Percentage of valid SNOA observations retained at this stage. "
+        "Lower SNOA values are preferred by this screening method."
     ),
 )
 
@@ -608,21 +639,22 @@ gp_retention = st.sidebar.slider(
     value=50,
     step=5,
     help=(
-        "The percentage of companies with valid gross profitability values "
-        "kept at this stage. Higher gross profitability is preferred."
+        "Percentage of valid gross profitability observations retained. "
+        "Higher gross profitability values are preferred."
     ),
 )
 
 st.sidebar.divider()
+
 st.sidebar.caption(
-    "Retention percentages apply to the valid observations entering each "
-    "stage, after missing values have been removed. The retained count "
-    "uses floor(valid observations × retention percentage)."
+    "Retention percentages apply to valid observations entering each stage. "
+    "The retained count is rounded down to a whole company. Missing values "
+    "are counted separately from companies excluded by the ranking cutoff."
 )
 
 
 # ============================================================
-# MARKET CAP ELIGIBILITY
+# 8. MARKET-CAP ELIGIBILITY
 # ============================================================
 
 minimum_market_cap = market_cap_min_billions * 1_000_000_000
@@ -636,15 +668,16 @@ eligible_count = len(eligible)
 
 
 # ============================================================
-# SCREENING FUNNEL
+# 9. SCREENING FUNNEL
 # ============================================================
 
 st.header("Screening Funnel")
 
 st.markdown(
     """
-    The funnel applies the filters in order. The results at each stage
-    depend on the companies that passed all earlier stages.
+    The screen begins with companies meeting the market-cap requirement.
+    It then applies the Altman Z threshold, STA filter, SNOA filter, and
+    gross profitability filter in that order.
     """
 )
 
@@ -652,9 +685,9 @@ funnel_rows = []
 cutoff_details = {}
 
 
-# ------------------------------
-# Stage 1: Altman Z
-# ------------------------------
+# ------------------------------------------------------------
+# Stage 1: Altman Z threshold
+# ------------------------------------------------------------
 
 stage_entering = len(eligible)
 
@@ -669,7 +702,6 @@ altman_excluded = altman_valid[
     altman_valid["Altman_Z"] < altman_threshold
 ].copy()
 
-# A higher Altman Z is preferred, so list higher values first.
 altman_excluded = stable_sort(
     altman_excluded,
     "Altman_Z",
@@ -703,9 +735,9 @@ cutoff_details["Altman Z"] = {
 current = altman_passed.copy()
 
 
-# ------------------------------
+# ------------------------------------------------------------
 # Stage 2: STA
-# ------------------------------
+# ------------------------------------------------------------
 
 sta_survivors, sta_summary, sta_cutoff = retention_filter(
     current,
@@ -721,9 +753,9 @@ cutoff_details["STA"] = sta_cutoff
 current = sta_survivors.copy()
 
 
-# ------------------------------
+# ------------------------------------------------------------
 # Stage 3: SNOA
-# ------------------------------
+# ------------------------------------------------------------
 
 snoa_survivors, snoa_summary, snoa_cutoff = retention_filter(
     current,
@@ -739,9 +771,9 @@ cutoff_details["SNOA"] = snoa_cutoff
 current = snoa_survivors.copy()
 
 
-# ------------------------------
-# Stage 4: Gross Profitability
-# ------------------------------
+# ------------------------------------------------------------
+# Stage 4: Gross profitability
+# ------------------------------------------------------------
 
 gp_survivors, gp_summary, gp_cutoff = retention_filter(
     current,
@@ -756,8 +788,6 @@ cutoff_details["Gross Profitability"] = gp_cutoff
 
 final_survivors = gp_survivors.copy()
 
-# Add composite scores already calculated across the full dataset.
-# Re-sort the final funnel by composite score for the candidate list.
 final_survivors = final_survivors.sort_values(
     by=["Quality_Score", "Sort_Ticker"],
     ascending=[False, True],
@@ -766,7 +796,7 @@ final_survivors = final_survivors.sort_values(
 
 
 # ============================================================
-# FUNNEL SUMMARY TABLE AND CHART
+# 10. FUNNEL SUMMARY AND CHART
 # ============================================================
 
 funnel_table = pd.DataFrame(funnel_rows)
@@ -788,6 +818,7 @@ fig = px.bar(
 )
 
 fig.update_traces(textposition="outside")
+
 fig.update_layout(
     xaxis_title="Screening stage",
     yaxis_title="Companies remaining",
@@ -800,26 +831,27 @@ st.plotly_chart(fig, use_container_width=True)
 if not final_survivors.empty:
     st.success(
         f"**{len(final_survivors):,} companies passed all four financial "
-        f"stages**, from {eligible_count:,} companies meeting the market "
-        f"capitalization requirement."
+        f"stages**, from {eligible_count:,} companies meeting the market-cap "
+        f"requirement."
     )
 else:
     st.warning(
         "No companies passed all four stages with the current settings. "
-        "Consider reviewing the retention percentages or Altman Z threshold."
+        "Review the retention percentages and Altman Z threshold."
     )
 
 
 # ============================================================
-# CUTOFF INSPECTION
+# 11. CUTOFF INSPECTION
 # ============================================================
 
 st.header("Cutoff Inspection")
 
 st.markdown(
     """
-    Review the companies immediately around each filter's boundary.
-    This helps show which observations were retained or excluded and why.
+    Review the companies closest to each filter's boundary. This shows
+    the last excluded and last retained observations, along with the
+    number of companies affected by the filter.
     """
 )
 
@@ -852,17 +884,17 @@ show_cutoff_details(
 
 
 # ============================================================
-# TOP BUY CANDIDATES
+# 12. TOP 10 BUY CANDIDATES
 # ============================================================
 
 st.header("Top 10 BUY Candidates")
 
 st.markdown(
     """
-    These are the highest composite-scoring companies among those that
-    passed the full funnel. The composite score summarizes relative
-    performance across the four financial metrics; it is not a price
-    target or a guarantee of future returns.
+    These are the highest composite-scoring companies among the final
+    funnel survivors with complete scores. The composite score measures
+    relative financial characteristics; it is not a price target or a
+    guarantee of future returns.
     """
 )
 
@@ -880,8 +912,8 @@ buy_candidates = buy_pool.head(10).copy()
 
 if buy_candidates.empty:
     st.info(
-        "No BUY candidates are available because no companies passed the "
-        "funnel with a complete composite score."
+        "No BUY candidates are available because no companies passed "
+        "the funnel with a complete composite score."
     )
 else:
     buy_table = prepare_display_table(buy_candidates)
@@ -904,7 +936,7 @@ else:
 
 
 # ============================================================
-# TOP SELL CANDIDATES
+# 13. TOP 10 SELL CANDIDATES
 # ============================================================
 
 st.header("Top 10 SELL Candidates")
@@ -912,9 +944,9 @@ st.header("Top 10 SELL Candidates")
 st.markdown(
     """
     These are the lowest composite-scoring companies among the market-cap
-    eligible universe with all four metrics available. Unlike the BUY
-    list, this list is not restricted to companies that passed the funnel.
-    It is a relative comparison group, not a recommendation to short a stock.
+    eligible universe with all four metrics available. This list is not
+    restricted to companies that passed the funnel. It is a relative
+    comparison group, not a recommendation to short a stock.
     """
 )
 
@@ -956,7 +988,7 @@ else:
 
 
 # ============================================================
-# COMPOSITE SCORE EXPLANATION
+# 14. COMPOSITE QUALITY SCORE
 # ============================================================
 
 st.header("Composite Quality Score")
@@ -964,49 +996,42 @@ st.header("Composite Quality Score")
 st.markdown(
     """
     The composite score is an equal-weight average of four percentile
-    scores. Each percentile score is oriented so that a higher score
-    represents a more favourable relative position.
+    scores. Each component is oriented so that a higher score indicates
+    a more favourable relative position.
     """
 )
 
-score_columns = [
-    "Altman_Score",
-    "STA_Score",
-    "SNOA_Score",
-    "GP_Score",
-]
-
-composite_formula = (
-    "Composite\\ Score = "
-    "\\frac{Altman\\ Z\\ Percentile + STA\\ Percentile + "
-    "SNOA\\ Percentile + GP\\ Percentile}{4}"
+st.latex(
+    r"\text{Composite Score} = "
+    r"\frac{S_Z + S_{STA} + S_{SNOA} + S_{GP}}{4}"
 )
-
-st.latex(composite_formula)
 
 st.markdown(
     """
-    **Score interpretation**
+    **Component interpretation**
 
     - **Altman Z percentile:** higher Altman Z receives a higher score.
     - **STA percentile:** lower STA receives a higher score.
     - **SNOA percentile:** lower SNOA receives a higher score.
     - **Gross profitability percentile:** higher gross profitability
       receives a higher score.
-    - The composite score is available only when all four underlying
-      financial metrics are present.
-    - Percentile scores are relative to the dataset used for the
-      calculation. They are not probabilities, expected returns, or
-      absolute measures of investment quality.
+    - The composite score is calculated only when all four metrics are
+      available.
+    - Percentile scores are relative measures. They are not probabilities,
+      expected returns, or absolute measures of investment quality.
     """
 )
 
 
 # ============================================================
-# STAGE SURVIVORS AND EXPORT
+# 15. INSPECT STAGE SURVIVORS
 # ============================================================
 
 st.header("Inspect Companies at Each Stage")
+
+st.markdown(
+    "Select a group to review the companies remaining at that point in the funnel."
+)
 
 stage_options = {
     "Market-cap eligible universe": eligible,
@@ -1017,7 +1042,7 @@ stage_options = {
 }
 
 selected_stage = st.selectbox(
-    "Select a group of companies to inspect",
+    "Select a group of companies",
     list(stage_options.keys()),
 )
 
@@ -1048,16 +1073,16 @@ else:
 
 
 # ============================================================
-# DATA COVERAGE
+# 16. DATA COVERAGE
 # ============================================================
 
 st.header("Data Coverage")
 
 st.markdown(
     """
-    Coverage indicates how many companies have each metric available.
-    A company missing a required metric is excluded at the relevant
-    stage rather than being assigned an artificial zero.
+    Coverage shows how many companies have each financial metric available.
+    Missing values are not replaced with zero; companies lacking a required
+    metric are removed at the relevant screening stage.
     """
 )
 
@@ -1081,7 +1106,9 @@ for label, column in coverage_metrics.items():
             "Available": available_count,
             "Missing": missing_count,
             "Coverage (%)": (
-                available_count / total_count * 100 if total_count else np.nan
+                available_count / total_count * 100
+                if total_count
+                else np.nan
             ),
         }
     )
@@ -1121,40 +1148,58 @@ with metric_col3:
 
 
 # ============================================================
-# METHODOLOGY
+# 17. METHODOLOGY
 # ============================================================
 
-st.markdown('<div id="methodology"></div>', unsafe_allow_html=True)
+# This HTML anchor provides the destination for the methodology link
+# near the top of the page.
+st.markdown(
+    '<div id="methodology"></div>',
+    unsafe_allow_html=True,
+)
 
 st.header("Methodology")
 
 st.markdown(
     """
-    This section documents the formulas, screening sequence, ranking
-    rules, and limitations used by the dashboard.
+    This section documents the financial formulas, screening sequence,
+    ranking rules, composite score, and limitations used by the dashboard.
     """
 )
 
-with st.expander("1. Universe and market capitalization", expanded=True):
+
+# ------------------------------------------------------------
+# 17.1 Universe and market capitalization
+# ------------------------------------------------------------
+
+with st.expander(
+    "1. Universe and market capitalization",
+    expanded=True,
+):
     st.markdown(
         """
-        The screen starts with the companies contained in `universe.csv`.
-        The market-cap control removes companies whose parsed market
-        capitalization is below the selected minimum.
+        The screen starts with the companies in `universe.csv`. The minimum
+        market-cap control removes companies whose parsed market
+        capitalization is below the selected value.
 
-        Market capitalization is expressed in dollars internally.
-        Values such as `$850B` and `$2.4T` are converted to numeric values
-        for filtering. Companies with an unavailable or unparseable market
+        Market capitalization is converted to numeric dollars for filtering.
+        For example, `$850B` becomes 850 billion dollars and `$2.4T` becomes
+        2.4 trillion dollars. Companies with missing or unparseable market
         capitalization cannot pass this initial eligibility step.
         """
     )
+
+
+# ------------------------------------------------------------
+# 17.2 Altman Z-score
+# ------------------------------------------------------------
 
 with st.expander("2. Altman Z-score", expanded=True):
     st.markdown(
         """
         The manufacturing version of the Altman Z-score combines five
-        accounting and market-based ratios. The dashboard uses the
-        `Altman_Z` value supplied in the dataset for screening.
+        financial ratios. The screen uses the precomputed `Altman_Z`
+        value supplied in the source dataset.
         """
     )
 
@@ -1162,49 +1207,61 @@ with st.expander("2. Altman Z-score", expanded=True):
         r"Z = 1.2X_1 + 1.4X_2 + 3.3X_3 + 0.6X_4 + 1.0X_5"
     )
 
-    st.markdown("The five components are:")
+    st.markdown("The components are defined as:")
 
     st.latex(
         r"X_1 = \frac{\text{Working Capital}}{\text{Total Assets}}"
     )
+
     st.latex(
         r"X_2 = \frac{\text{Retained Earnings}}{\text{Total Assets}}"
     )
+
     st.latex(
         r"X_3 = \frac{\text{EBIT}}{\text{Total Assets}}"
     )
+
     st.latex(
-        r"X_4 = \frac{\text{Market Value of Equity}}{\text{Total Liabilities}}"
+        r"X_4 = \frac{\text{Market Value of Equity}}"
+        r"{\text{Total Liabilities}}"
     )
+
     st.latex(
         r"X_5 = \frac{\text{Sales}}{\text{Total Assets}}"
     )
 
     st.markdown(
         """
-        **Commonly cited manufacturing-company reference zones**
+        **Commonly cited reference zones for the manufacturing model**
 
         - **Z below 1.81:** distress zone.
         - **Z from 1.81 to 2.99:** grey zone.
         - **Z above 2.99:** safe zone.
 
-        These are reference boundaries, not guarantees of bankruptcy or
-        financial safety. The dashboard's selected minimum is a screening
-        parameter. At the default of 1.81, companies with Z-scores below
+        These are commonly cited reference boundaries, not guarantees of
+        bankruptcy or financial safety. The selected minimum is a screening
+        parameter. At the default of 1.81, companies with a Z-score below
         1.81 are excluded.
 
-        The ratios are used as inputs to the Z-score formula; the existing
-        Z-score is not recalculated by this app. This avoids silently
-        changing the source dataset's calculations.
+        The app does not recalculate the Z-score from its component ratios.
+        It uses the precomputed `Altman_Z` column in the dataset.
         """
     )
 
-with st.expander("3. STA: total accruals scaled by assets", expanded=True):
+
+# ------------------------------------------------------------
+# 17.3 STA
+# ------------------------------------------------------------
+
+with st.expander(
+    "3. STA — total accruals scaled by assets",
+    expanded=True,
+):
     st.markdown(
         """
-        STA is used here as an accrual-quality measure. Lower values are
-        preferred by this screen. The exact implementation follows the
-        variables supplied in the dataset.
+        STA is used as an accrual-quality measure. Under this screen,
+        lower values are preferred. The calculation follows the variables
+        and conventions represented in the source dataset.
         """
     )
 
@@ -1215,15 +1272,24 @@ with st.expander("3. STA: total accruals scaled by assets", expanded=True):
 
     st.markdown(
         """
-        **Screening direction:** ascending STA, so the lowest valid values
-        are retained first.
+        **Screening direction:** ascending STA, retaining the lowest
+        valid values first.
 
-        STA is not interpreted in isolation. Its meaning can depend on the
-        company's business model, accounting choices, and reporting period.
+        STA should not be interpreted in isolation. Its meaning can depend
+        on the company's business model, accounting choices, and reporting
+        period.
         """
     )
 
-with st.expander("4. SNOA: scaled net operating assets", expanded=True):
+
+# ------------------------------------------------------------
+# 17.4 SNOA
+# ------------------------------------------------------------
+
+with st.expander(
+    "4. SNOA — scaled net operating assets",
+    expanded=True,
+):
     st.markdown(
         """
         SNOA measures net operating assets relative to total assets.
@@ -1238,14 +1304,19 @@ with st.expander("4. SNOA: scaled net operating assets", expanded=True):
 
     st.markdown(
         """
-        **Screening direction:** ascending SNOA, so the lowest valid values
-        are retained first.
+        **Screening direction:** ascending SNOA, retaining the lowest
+        valid values first.
 
         Operating-asset and operating-liability definitions can vary across
-        data providers. The dashboard uses the SNOA values already stored
-        in the dataset.
+        data providers. This app uses the SNOA values already present in
+        the source dataset.
         """
     )
+
+
+# ------------------------------------------------------------
+# 17.5 Gross profitability
+# ------------------------------------------------------------
 
 with st.expander("5. Gross profitability", expanded=True):
     st.markdown(
@@ -1262,18 +1333,26 @@ with st.expander("5. Gross profitability", expanded=True):
 
     st.markdown(
         """
-        **Screening direction:** descending gross profitability, so the
-        highest valid values are retained first.
+        **Screening direction:** descending gross profitability, retaining
+        the highest valid values first.
 
-        The app uses the `Gross_Profitability` field in the dataset rather
-        than recalculating it from raw financial statements.
+        The app uses the precomputed `Gross_Profitability` field rather
+        than recalculating it from the raw financial-statement columns.
         """
     )
 
-with st.expander("6. Sequential funnel and retention percentages", expanded=True):
+
+# ------------------------------------------------------------
+# 17.6 Funnel and retention percentages
+# ------------------------------------------------------------
+
+with st.expander(
+    "6. Sequential funnel and retention percentages",
+    expanded=True,
+):
     st.markdown(
         """
-        The screening sequence is:
+        The screen applies the following stages in order:
 
         1. Minimum market capitalization.
         2. Altman Z-score threshold.
@@ -1281,13 +1360,15 @@ with st.expander("6. Sequential funnel and retention percentages", expanded=True
         4. SNOA rank-retention filter.
         5. Gross profitability rank-retention filter.
 
-        Each stage operates only on the companies that survived the previous
-        stage. Therefore, changing an earlier filter can change the
-        companies and counts entering every later filter.
+        Each stage operates only on the companies that survived the
+        preceding stage. Therefore, changing an earlier filter can change
+        the number and identity of companies entering later stages.
         """
     )
 
-    st.markdown("For a rank-based stage, the target number retained is:")
+    st.markdown(
+        "For rank-based filters, the target number retained is:"
+    )
 
     st.latex(
         r"N_{\text{retained}} = "
@@ -1299,28 +1380,36 @@ with st.expander("6. Sequential funnel and retention percentages", expanded=True
         """
         Where:
 
-        - \(N_{\\text{valid}}\) is the number of companies entering that
-          stage with a non-missing value for its required metric.
+        - \(N_{\\text{valid}}\) is the number of companies entering the
+          stage with a non-missing value for the required metric.
         - \(p\) is the selected retention percentage.
         - The floor operation rounds down to the nearest whole company.
 
-        Missing observations are removed and counted separately from
-        companies excluded by the ranking cutoff. The retention percentage
-        is applied to valid observations, not to the original universe size.
+        Missing observations are counted separately from companies excluded
+        by the rank cutoff. The retention percentage applies to valid
+        observations, not the original universe size.
 
-        When metric values tie across the retention boundary, ticker is
-        used as a deterministic secondary sort key. This makes the result
-        reproducible, although it means companies with identical metric
-        values can fall on opposite sides of the cutoff.
+        When equal metric values fall across a retention boundary, ticker
+        is used as a deterministic secondary sort key. This makes the
+        selection reproducible, but companies with identical metric values
+        can be split across the cutoff.
         """
     )
 
-with st.expander("7. Percentile scores and composite quality score", expanded=True):
+
+# ------------------------------------------------------------
+# 17.7 Percentile and composite scores
+# ------------------------------------------------------------
+
+with st.expander(
+    "7. Percentile scores and composite quality score",
+    expanded=True,
+):
     st.markdown(
         """
-        The composite score compares eligible companies on four metrics.
-        Each score is a percentile rank within the dataset and is oriented
-        so that a higher score indicates a more favourable relative position.
+        The composite score compares companies on four percentile scores.
+        Each component is oriented so that a higher score indicates a more
+        favourable relative position.
         """
     )
 
@@ -1333,21 +1422,26 @@ with st.expander("7. Percentile scores and composite quality score", expanded=Tr
         """
         Where:
 
-        - \(S_Z\) is the Altman Z percentile score; higher Z is preferred.
-        - \(S_{STA}\) is the STA percentile score; lower STA is preferred.
-        - \(S_{SNOA}\) is the SNOA percentile score; lower SNOA is preferred.
-        - \(S_{GP}\) is the gross profitability percentile score; higher
-          gross profitability is preferred.
+        - \(S_Z\) is the Altman Z percentile; higher Z is preferred.
+        - \(S_{STA}\) is the STA percentile; lower STA is preferred.
+        - \(S_{SNOA}\) is the SNOA percentile; lower SNOA is preferred.
+        - \(S_{GP}\) is the gross profitability percentile; higher values
+          are preferred.
 
-        Each component is scaled from 0 to 100. The four components receive
-        equal weight. The composite score is calculated only when all four
-        underlying metrics are present.
+        Each component is scaled from 0 to 100 and receives equal weight.
+        The composite score is calculated only when all four underlying
+        metrics are available.
 
-        Percentile scores depend on the companies included in the ranking.
-        They are relative measures, not probabilities, expected returns,
-        valuation targets, or absolute ratings.
+        The percentile scores are relative to the dataset being ranked.
+        They are not probabilities, expected returns, valuation targets,
+        or absolute measures of investment quality.
         """
     )
+
+
+# ------------------------------------------------------------
+# 17.8 BUY and SELL lists
+# ------------------------------------------------------------
 
 with st.expander("8. BUY and SELL candidate lists", expanded=True):
     st.markdown(
@@ -1357,37 +1451,45 @@ with st.expander("8. BUY and SELL candidate lists", expanded=True):
 
         **Top 10 SELL candidates:** the ten lowest composite-scoring
         companies among the market-cap eligible universe with a complete
-        score. The SELL list is not restricted to companies that passed
-        the funnel.
+        score. This group is not restricted to companies that passed the
+        funnel.
 
-        These labels describe the output of this particular quantitative
-        screen. They do not constitute individualized investment advice,
-        and they do not account for every factor relevant to an investment
-        decision.
+        These labels describe the output of this quantitative screen.
+        They do not constitute individualized investment advice and do
+        not incorporate every factor relevant to an investment decision.
         """
     )
+
+
+# ------------------------------------------------------------
+# 17.9 Data coverage and limitations
+# ------------------------------------------------------------
 
 with st.expander("9. Data coverage and limitations", expanded=True):
     st.markdown(
         """
         - The app uses the local `universe.csv` file; it does not retrieve
           live market or financial-statement data.
-        - The financial metrics are used as provided in the source file.
-          The app does not independently audit company filings or provider
-          calculations.
+        - Financial metrics are used as provided in the source file. The app
+          does not independently audit company filings or provider formulas.
         - Missing values remain missing and are not replaced with zero.
-        - Different financial data providers can use different definitions,
-          fiscal dates, and calculation conventions.
-        - The manufacturing Altman Z formulation is not necessarily
-          appropriate for every company, capital structure, or industry.
+        - Data providers can use different definitions, fiscal dates, and
+          calculation conventions.
+        - The manufacturing Altman Z model is not necessarily appropriate
+          for every company, capital structure, or industry.
         - The funnel and composite score are screening tools, not substitutes
-          for reviewing financial statements, valuation, liquidity, debt,
+          for reviewing financial statements, valuation, debt, liquidity,
           competitive position, and company-specific risks.
         """
     )
 
+
+# ============================================================
+# 18. FOOTER
+# ============================================================
+
 st.caption(
     "Manufacturing Stock Screener • Quantitative screening only • "
-    "Review the underlying data and company filings before making "
+    "Review underlying data and company filings before making "
     "investment decisions."
 )
