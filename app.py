@@ -1,6 +1,4 @@
 
-import io
-import re
 from pathlib import Path
 
 import numpy as np
@@ -22,40 +20,38 @@ st.set_page_config(
 
 st.title("Stock Screening Dashboard")
 st.caption(
-    "A data-driven stock screener using Altman Z-Score, "
+    "A quantitative stock screener using Altman Z-Score, "
     "Gross Profitability, accruals, and operating assets."
 )
 
 
 # ============================================================
-# DEFAULT SETTINGS AND SYNCHRONIZED WIDGET KEYS
+# DEFAULT SETTINGS
 # ============================================================
 
 DEFAULTS = {
     "min_market_cap": 0.0,
-    "gpa_pct": 10,
     "sta_pct": 10,
     "snoa_pct": 10,
     "safe_z": 2.99,
     "distress_z": 1.81,
+    "gpa_pct": 10,
     "min_signals": 2,
 }
 
-# IMPORTANT:
-# These names must match the actual keys used by the sliders.
+# Only sidebar widgets are used.
 WIDGET_KEYS = {
-    "min_market_cap": ["cap_sidebar", "cap_main"],
-    "gpa_pct": ["gpa_pct_sidebar", "gpa_pct_main"],
-    "sta_pct": ["sta_pct_sidebar", "sta_pct_main"],
-    "snoa_pct": ["snoa_pct_sidebar", "snoa_pct_main"],
-    "safe_z": ["safe_z_sidebar", "safe_z_main"],
-    "distress_z": ["distress_z_sidebar", "distress_z_main"],
-    "min_signals": ["signals_sidebar", "signals_main"],
+    "min_market_cap": ["cap_sidebar"],
+    "sta_pct": ["sta_pct_sidebar"],
+    "snoa_pct": ["snoa_pct_sidebar"],
+    "safe_z": ["safe_z_sidebar"],
+    "distress_z": ["distress_z_sidebar"],
+    "gpa_pct": ["gpa_pct_sidebar"],
+    "min_signals": ["signals_sidebar"],
 }
 
 
 def initialize_settings():
-    """Initialize shared settings and both copies of each widget."""
     for setting, default in DEFAULTS.items():
         if setting not in st.session_state:
             st.session_state[setting] = default
@@ -66,93 +62,18 @@ def initialize_settings():
 
 
 def sync_setting(setting, source_key):
-    """Keep the main-page and sidebar versions of a setting synchronized."""
-    value = st.session_state[source_key]
-    st.session_state[setting] = value
-
-    for widget_key in WIDGET_KEYS[setting]:
-        st.session_state[widget_key] = value
+    st.session_state[setting] = st.session_state[source_key]
 
 
 initialize_settings()
 
 
 # ============================================================
-# DATA LOADING AND CLEANING
+# DATA HELPERS
 # ============================================================
 
-DATA_FILE = Path(__file__).parent / "universe.csv"
-
-
-@st.cache_data
-def load_data(file_path, modified_time):
-    """Load and clean the stock universe."""
-    data = pd.read_csv(file_path)
-
-    # Convert numeric columns that may have been read as text.
-    numeric_columns = [
-        "Rank",
-        "Price",
-        "Today",
-        "Price (30 days)",
-        "X1_Working_Capital_Pct",
-        "X2_Retained_Earnings_Pct",
-        "X3_EBIT_Pct",
-        "X4_Market_Equity_to_Liabilities_Pct",
-        "X5_Sales_to_Assets",
-        "Altman_Z",
-        "STA",
-        "SNOA",
-        "Gross_Profit",
-        "Total_Assets",
-        "Gross_Profitability",
-    ]
-
-    for column in numeric_columns:
-        if column in data.columns:
-            data[column] = pd.to_numeric(
-                data[column]
-                .astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace("%", "", regex=False)
-                .str.strip(),
-                errors="coerce",
-            )
-
-    # Convert market-cap text such as "$2.4T", "$850B", "$45.2M".
-    if "Market Cap" in data.columns:
-        data["Market_Cap_Value"] = (
-            data["Market Cap"].apply(parse_market_cap)
-        )
-    else:
-        data["Market_Cap_Value"] = np.nan
-
-    # Ensure text columns have consistent missing-value handling.
-    for column in [
-        "Ticker",
-        "Ticker_guess",
-        "Name",
-        "Country",
-        "Altman_Status",
-        "STA_Status",
-        "SNOA_Status",
-        "GP_Status",
-    ]:
-        if column in data.columns:
-            data[column] = data[column].fillna("").astype(str)
-
-    # If Ticker is blank, fall back to Ticker_guess.
-    if "Ticker" in data.columns and "Ticker_guess" in data.columns:
-        blank_ticker = data["Ticker"].str.strip().eq("")
-        data.loc[blank_ticker, "Ticker"] = data.loc[
-            blank_ticker, "Ticker_guess"
-        ]
-
-    return data
-
-
 def parse_market_cap(value):
-    """Convert market-cap strings into numeric dollar values."""
+    """Convert values such as $2.4T, $850B, and $45.2M to dollars."""
     if pd.isna(value):
         return np.nan
 
@@ -187,12 +108,121 @@ def parse_market_cap(value):
         return np.nan
 
 
+def format_market_cap(value):
+    if pd.isna(value) or str(value).strip() == "":
+        return "—"
+    return str(value)
+
+
+def format_percent(value):
+    if pd.isna(value):
+        return "—"
+    return f"{value * 100:.2f}%"
+
+
+def display_table(frame, columns):
+    result = frame[columns].copy()
+
+    if "Market Cap" in result.columns:
+        result["Market Cap"] = result["Market Cap"].apply(
+            format_market_cap
+        )
+
+    for column in [
+        "STA",
+        "SNOA",
+        "Gross_Profitability",
+    ]:
+        if column in result.columns:
+            result[column] = result[column].apply(format_percent)
+
+    if "Altman_Z" in result.columns:
+        result["Altman_Z"] = result["Altman_Z"].apply(
+            lambda x: "—" if pd.isna(x) else f"{x:.2f}"
+        )
+
+    return result
+
+
+def export_csv(frame):
+    return frame.to_csv(index=False).encode("utf-8")
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+DATA_FILE = Path(__file__).parent / "universe.csv"
+
 if not DATA_FILE.exists():
     st.error(
         "Could not find universe.csv. Make sure it is in the same "
-        "GitHub repository folder as app.py."
+        "repository folder as app.py."
     )
     st.stop()
+
+
+@st.cache_data
+def load_data(file_path, modified_time):
+    df = pd.read_csv(file_path)
+
+    numeric_columns = [
+        "Rank",
+        "Price",
+        "Today",
+        "Price (30 days)",
+        "X1_Working_Capital_Pct",
+        "X2_Retained_Earnings_Pct",
+        "X3_EBIT_Pct",
+        "X4_Market_Equity_to_Liabilities_Pct",
+        "X5_Sales_to_Assets",
+        "Altman_Z",
+        "STA",
+        "SNOA",
+        "Gross_Profit",
+        "Total_Assets",
+        "Gross_Profitability",
+    ]
+
+    for column in numeric_columns:
+        if column in df.columns:
+            df[column] = pd.to_numeric(
+                df[column]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("%", "", regex=False)
+                .str.strip(),
+                errors="coerce",
+            )
+
+    if "Market Cap" in df.columns:
+        df["Market_Cap_Value"] = df["Market Cap"].apply(
+            parse_market_cap
+        )
+    else:
+        df["Market_Cap_Value"] = np.nan
+
+    for column in [
+        "Ticker",
+        "Ticker_guess",
+        "Name",
+        "Country",
+        "Altman_Status",
+        "STA_Status",
+        "SNOA_Status",
+        "GP_Status",
+    ]:
+        if column in df.columns:
+            df[column] = df[column].fillna("").astype(str)
+
+    if "Ticker" in df.columns and "Ticker_guess" in df.columns:
+        blank_ticker = df["Ticker"].str.strip().eq("")
+        df.loc[blank_ticker, "Ticker"] = df.loc[
+            blank_ticker, "Ticker_guess"
+        ]
+
+    return df
+
 
 data = load_data(str(DATA_FILE), DATA_FILE.stat().st_mtime)
 
@@ -200,10 +230,6 @@ if data.empty:
     st.error("The stock universe is empty.")
     st.stop()
 
-
-# ============================================================
-# VALIDATE REQUIRED COLUMNS
-# ============================================================
 
 required_columns = [
     "Ticker",
@@ -222,7 +248,7 @@ missing_columns = [
 
 if missing_columns:
     st.error(
-        "The following required columns are missing from universe.csv: "
+        "Missing required columns in universe.csv: "
         + ", ".join(missing_columns)
     )
     st.stop()
@@ -232,8 +258,8 @@ if missing_columns:
 # SLIDER HELPERS
 # ============================================================
 
-def add_cap_slider(location):
-    key = f"cap_{location}"
+def add_cap_slider():
+    key = "cap_sidebar"
 
     st.slider(
         "Minimum market cap ($ billions)",
@@ -243,12 +269,12 @@ def add_cap_slider(location):
         key=key,
         on_change=sync_setting,
         args=("min_market_cap", key),
-        help="Companies below this market capitalization are excluded.",
+        help="Excludes companies below the selected market capitalization.",
     )
 
 
-def add_percent_slider(setting, location, label, help_text):
-    key = f"{setting}_{location}"
+def add_percent_slider(setting, label, help_text):
+    key = f"{setting}_sidebar"
 
     st.slider(
         label,
@@ -262,8 +288,8 @@ def add_percent_slider(setting, location, label, help_text):
     )
 
 
-def add_z_slider(setting, location, label, min_value, max_value, step):
-    key = f"{setting}_{location}"
+def add_z_slider(setting, label, min_value, max_value, step):
+    key = f"{setting}_sidebar"
 
     st.slider(
         label,
@@ -276,11 +302,11 @@ def add_z_slider(setting, location, label, min_value, max_value, step):
     )
 
 
-def add_signal_slider(location):
-    key = f"signals_{location}"
+def add_signal_slider():
+    key = "signals_sidebar"
 
     st.slider(
-        "Minimum BUY signals for combined BUY",
+        "Minimum BUY/SELL signals",
         min_value=1,
         max_value=4,
         step=1,
@@ -288,57 +314,48 @@ def add_signal_slider(location):
         on_change=sync_setting,
         args=("min_signals", key),
         help=(
-            "A company must meet this number of individual BUY criteria "
-            "to qualify for the combined BUY list."
+            "Minimum number of matching signals required for a combined "
+            "classification."
         ),
     )
 
 
 # ============================================================
-# SIDEBAR FILTERS
+# SIDEBAR — ORDERED TO MATCH DASHBOARD STEPS
 # ============================================================
 
 with st.sidebar:
-    st.header("Screen Settings")
+    st.header("Screen Filters")
     st.caption(
-        "Changing a setting updates the corresponding control on the "
-        "main page as well."
+        "Adjust the filters here to update the tables and charts."
     )
 
-    add_cap_slider("sidebar")
+    st.subheader("Step 1 — Stock Universe")
+    add_cap_slider()
 
     st.divider()
-    st.subheader("Gross Profitability")
-    add_percent_slider(
-        "gpa_pct",
-        "sidebar",
-        "Minimum Gross Profitability (%)",
-        "Gross Profit divided by total assets. Higher is better.",
-    )
 
-    st.divider()
-    st.subheader("Accruals (STA)")
+    st.subheader("Step 2 — STA (Accruals)")
     add_percent_slider(
         "sta_pct",
-        "sidebar",
-        "STA signal threshold (%)",
-        "Lower STA is treated as the BUY direction; higher STA as SELL.",
+        "STA threshold (%)",
+        "Lower STA is treated as better in this screen.",
     )
 
     st.divider()
-    st.subheader("Net Operating Assets (SNOA)")
+
+    st.subheader("Step 3 — SNOA")
     add_percent_slider(
         "snoa_pct",
-        "sidebar",
-        "SNOA signal threshold (%)",
-        "Lower SNOA is treated as the BUY direction; higher SNOA as SELL.",
+        "SNOA threshold (%)",
+        "Lower SNOA is treated as better in this screen.",
     )
 
     st.divider()
-    st.subheader("Altman Z-Score")
+
+    st.subheader("Step 4 — Altman Z-Score")
     add_z_slider(
         "safe_z",
-        "sidebar",
         "Safe-zone threshold",
         1.0,
         5.0,
@@ -346,7 +363,6 @@ with st.sidebar:
     )
     add_z_slider(
         "distress_z",
-        "sidebar",
         "Distress threshold",
         0.5,
         3.0,
@@ -354,61 +370,62 @@ with st.sidebar:
     )
 
     st.divider()
-    add_signal_slider("sidebar")
 
-    if st.button("Reset all settings", use_container_width=True):
+    st.subheader("Step 5 — Gross Profitability")
+    add_percent_slider(
+        "gpa_pct",
+        "Minimum Gross Profitability (%)",
+        "Higher Gross Profitability is treated as better.",
+    )
+
+    st.divider()
+
+    st.subheader("Step 6 — Combined Screen")
+    add_signal_slider()
+
+    st.divider()
+
+    if st.button("Reset all filters", use_container_width=True):
         for setting, default in DEFAULTS.items():
             st.session_state[setting] = default
+
             for widget_key in WIDGET_KEYS[setting]:
                 st.session_state[widget_key] = default
+
         st.rerun()
 
 
 # ============================================================
-# MARKET CAP FILTER
+# APPLY MARKET CAP FILTER
 # ============================================================
 
-min_market_cap_dollars = (
-    st.session_state["min_market_cap"] * 1e9
-)
+min_market_cap_dollars = st.session_state["min_market_cap"] * 1e9
 
-filtered_data = data.copy()
-
-filtered_data = filtered_data[
-    filtered_data["Market_Cap_Value"].notna()
+filtered_data = data[
+    data["Market_Cap_Value"].notna()
     & (
-        filtered_data["Market_Cap_Value"]
+        data["Market_Cap_Value"]
         >= min_market_cap_dollars
     )
 ].copy()
 
 
 # ============================================================
-# SCORING AND SIGNAL CLASSIFICATION
+# CALCULATE SIGNALS
 # ============================================================
 
 def score_companies(universe):
-    """Calculate individual signals and combined classifications."""
     scored = universe.copy()
 
     gpa_threshold = st.session_state["gpa_pct"] / 100
     sta_threshold = st.session_state["sta_pct"] / 100
     snoa_threshold = st.session_state["snoa_pct"] / 100
+
     safe_z = st.session_state["safe_z"]
     distress_z = st.session_state["distress_z"]
+    min_signals = st.session_state["min_signals"]
 
-    # Gross Profitability: higher is better.
-    scored["GPA_BUY"] = (
-        scored["Gross_Profitability"].notna()
-        & (scored["Gross_Profitability"] >= gpa_threshold)
-    )
-    scored["GPA_SELL"] = (
-        scored["Gross_Profitability"].notna()
-        & (scored["Gross_Profitability"] < 0)
-    )
-
-    # STA = (Net Income - Operating Cash Flow) / Total Assets.
-    # Lower STA is treated as a positive signal.
+    # Step 2: STA — lower is treated as better.
     scored["STA_BUY"] = (
         scored["STA"].notna()
         & (scored["STA"] <= -sta_threshold)
@@ -418,7 +435,7 @@ def score_companies(universe):
         & (scored["STA"] >= sta_threshold)
     )
 
-    # SNOA: lower is treated as better.
+    # Step 3: SNOA — lower is treated as better.
     scored["SNOA_BUY"] = (
         scored["SNOA"].notna()
         & (scored["SNOA"] <= -snoa_threshold)
@@ -428,7 +445,7 @@ def score_companies(universe):
         & (scored["SNOA"] >= snoa_threshold)
     )
 
-    # Altman Z: higher is better.
+    # Step 4: Altman Z-Score — higher is treated as better.
     scored["Z_BUY"] = (
         scored["Altman_Z"].notna()
         & (scored["Altman_Z"] >= safe_z)
@@ -438,36 +455,38 @@ def score_companies(universe):
         & (scored["Altman_Z"] <= distress_z)
     )
 
+    # Step 5: Gross Profitability — higher is treated as better.
+    scored["GPA_BUY"] = (
+        scored["Gross_Profitability"].notna()
+        & (scored["Gross_Profitability"] >= gpa_threshold)
+    )
+    scored["GPA_SELL"] = (
+        scored["Gross_Profitability"].notna()
+        & (scored["Gross_Profitability"] < 0)
+    )
+
     buy_columns = [
-        "GPA_BUY",
         "STA_BUY",
         "SNOA_BUY",
         "Z_BUY",
+        "GPA_BUY",
     ]
     sell_columns = [
-        "GPA_SELL",
         "STA_SELL",
         "SNOA_SELL",
         "Z_SELL",
+        "GPA_SELL",
     ]
 
     scored["BUY_Signals"] = scored[buy_columns].sum(axis=1)
     scored["SELL_Signals"] = scored[sell_columns].sum(axis=1)
 
     scored["Available_Metrics"] = scored[
-        [
-            "Gross_Profitability",
-            "STA",
-            "SNOA",
-            "Altman_Z",
-        ]
+        ["STA", "SNOA", "Altman_Z", "Gross_Profitability"]
     ].notna().sum(axis=1)
 
-    min_signals = st.session_state["min_signals"]
-
-    # Avoid classifying a company as BUY if it also has a strong SELL
-    # signal. A company with enough BUY signals and no SELL signals
-    # qualifies as BUY.
+    # Companies with BUY and SELL signals are classified as NEUTRAL
+    # to avoid contradictory combined classifications.
     scored["Combined_Result"] = np.select(
         [
             (
@@ -490,89 +509,14 @@ scored_data = score_companies(filtered_data)
 
 
 # ============================================================
-# DISPLAY HELPERS
+# INDIVIDUAL SCREEN TABLES
 # ============================================================
 
-def format_percent(value):
-    if pd.isna(value):
-        return "—"
-    return f"{value * 100:.2f}%"
-
-
-def display_table(frame, columns):
-    """Create a display-friendly copy of the requested columns."""
-    result = frame[columns].copy()
-
-    if "Market Cap" in result.columns:
-        result["Market Cap"] = result["Market Cap"].apply(
-            format_market_cap
-        )
-
-    percent_columns = [
-        column for column in [
-            "STA",
-            "SNOA",
-            "Gross_Profitability",
-        ]
-        if column in result.columns
-    ]
-
-    for column in percent_columns:
-        result[column] = result[column].apply(format_percent)
-
-    if "Altman_Z" in result.columns:
-        result["Altman_Z"] = result["Altman_Z"].apply(
-            lambda x: "—" if pd.isna(x) else f"{x:.2f}"
-        )
-
-    return result
-
-
-def format_market_cap(value):
-    """Format the original market-cap string for display."""
-    if pd.isna(value) or str(value).strip() == "":
-        return "—"
-    return str(value)
-
-
-def export_csv(frame):
-    return frame.to_csv(index=False).encode("utf-8")
-
-
-def show_metric_table(data_with_signals, metric, buy_col, sell_col):
-    """
-    Display only companies that qualify for the individual metric screen.
-
-    BUY and SELL candidates are shown in separate groups. Companies that
-    qualify for both directions are marked as BOTH rather than silently
-    appearing in only one group.
-    """
-    required = [metric, buy_col, sell_col]
-
-    missing = [
-        column for column in required
-        if column not in data_with_signals.columns
-    ]
-
-    if missing:
-        st.error(
-            "Required screen columns are missing: "
-            + ", ".join(missing)
-        )
-        return
-
-    valid = data_with_signals[
-        data_with_signals[metric].notna()
-    ].copy()
+def show_metric_table(frame, metric, buy_col, sell_col):
+    valid = frame[frame[metric].notna()].copy()
 
     buy_mask = valid[buy_col].fillna(False).astype(bool)
     sell_mask = valid[sell_col].fillna(False).astype(bool)
-
-    valid["Screen Result"] = np.select(
-        [buy_mask & sell_mask, buy_mask, sell_mask],
-        ["BOTH signals", "BUY signal", "SELL signal"],
-        default="No signal",
-    )
 
     buy = valid[buy_mask & ~sell_mask].copy()
     sell = valid[sell_mask & ~buy_mask].copy()
@@ -607,16 +551,15 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
             "Name",
             "Market Cap",
             metric,
-            "Screen Result",
         ]
         if column in valid.columns
     ]
 
-    tab_buy, tab_sell, tab_both = st.tabs(
+    buy_tab, sell_tab, both_tab = st.tabs(
         ["BUY candidates", "SELL candidates", "Both signals"]
     )
 
-    with tab_buy:
+    with buy_tab:
         if buy.empty:
             st.info("No companies currently qualify for this BUY screen.")
         else:
@@ -628,12 +571,12 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
             st.download_button(
                 "Download BUY candidates",
                 data=export_csv(buy),
-                file_name=f"{metric.lower()}_buy_candidates.csv",
+                file_name=f"{metric.lower()}_buy.csv",
                 mime="text/csv",
                 key=f"{metric}_buy_download",
             )
 
-    with tab_sell:
+    with sell_tab:
         if sell.empty:
             st.info("No companies currently qualify for this SELL screen.")
         else:
@@ -645,12 +588,12 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
             st.download_button(
                 "Download SELL candidates",
                 data=export_csv(sell),
-                file_name=f"{metric.lower()}_sell_candidates.csv",
+                file_name=f"{metric.lower()}_sell.csv",
                 mime="text/csv",
                 key=f"{metric}_sell_download",
             )
 
-    with tab_both:
+    with both_tab:
         if both.empty:
             st.info("No companies currently qualify for both directions.")
         else:
@@ -661,117 +604,60 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
             )
 
 
+# ============================================================
+# DATA COVERAGE
+# ============================================================
+
 def show_coverage(frame):
-    metrics = {
+    metric_columns = {
         "Altman Z-Score": "Altman_Z",
         "STA": "STA",
         "SNOA": "SNOA",
         "Gross Profitability": "Gross_Profitability",
     }
 
-    coverage_rows = []
+    rows = []
 
-    for label, column in metrics.items():
-        if column not in frame.columns:
-            continue
-
+    for label, column in metric_columns.items():
         valid_count = int(frame[column].notna().sum())
         missing_count = int(frame[column].isna().sum())
-        coverage_rows.append(
+
+        rows.append(
             {
                 "Metric": label,
                 "Valid observations": valid_count,
                 "Missing observations": missing_count,
                 "Coverage (%)": (
-                    100 * valid_count / len(frame)
-                    if len(frame) > 0
+                    valid_count / len(frame) * 100
+                    if len(frame)
                     else 0
                 ),
             }
         )
 
-    if coverage_rows:
-        coverage = pd.DataFrame(coverage_rows)
-        coverage["Coverage (%)"] = coverage["Coverage (%)"].map(
-            lambda value: f"{value:.1f}%"
-        )
-        st.dataframe(
-            coverage,
-            use_container_width=True,
-            hide_index=True,
-        )
+    coverage = pd.DataFrame(rows)
+    coverage["Coverage (%)"] = coverage["Coverage (%)"].map(
+        lambda x: f"{x:.1f}%"
+    )
+
+    st.dataframe(
+        coverage,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # ============================================================
-# MAIN-PAGE FILTERS
-# ============================================================
-
-st.header("Screen Controls")
-st.caption(
-    "These controls are synchronized with the sidebar. "
-    "Changing either copy updates the screening results."
-)
-
-control1, control2 = st.columns(2)
-
-with control1:
-    add_cap_slider("main")
-    add_percent_slider(
-        "gpa_pct",
-        "main",
-        "Minimum Gross Profitability (%)",
-        "Higher gross profitability is treated as better.",
-    )
-    add_percent_slider(
-        "sta_pct",
-        "main",
-        "STA signal threshold (%)",
-        "Low negative STA is treated as BUY; high positive STA as SELL.",
-    )
-    add_percent_slider(
-        "snoa_pct",
-        "main",
-        "SNOA signal threshold (%)",
-        "Low negative SNOA is treated as BUY; high positive SNOA as SELL.",
-    )
-
-with control2:
-    add_z_slider(
-        "safe_z",
-        "main",
-        "Altman Z safe-zone threshold",
-        1.0,
-        5.0,
-        0.01,
-    )
-    add_z_slider(
-        "distress_z",
-        "main",
-        "Altman Z distress threshold",
-        0.5,
-        3.0,
-        0.01,
-    )
-    add_signal_slider("main")
-
-
-# Recalculate after all controls are rendered, using the latest settings.
-scored_data = score_companies(filtered_data)
-
-
-# ============================================================
-# STEP 1 — UNIVERSE OVERVIEW
+# STEP 1 — STOCK UNIVERSE
 # ============================================================
 
 st.divider()
 st.header("Step 1 — Stock Universe")
 
-total_universe = len(data)
-market_cap_universe = len(filtered_data)
-
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total companies", f"{total_universe:,}")
-m2.metric("After market-cap filter", f"{market_cap_universe:,}")
+
+m1.metric("Total companies", f"{len(data):,}")
+m2.metric("After market-cap filter", f"{len(scored_data):,}")
 m3.metric(
     "Combined BUY",
     f"{int((scored_data['Combined_Result'] == 'BUY').sum()):,}",
@@ -781,14 +667,7 @@ m4.metric(
     f"{int((scored_data['Combined_Result'] == 'SELL').sum()):,}",
 )
 
-if scored_data.empty:
-    st.warning(
-        "No companies remain after the market-cap filter. "
-        "Lower the minimum market cap to include more companies."
-    )
-    st.stop()
-
-with st.expander("View stock universe", expanded=False):
+with st.expander("View stock universe"):
     universe_columns = [
         column for column in [
             "Rank",
@@ -809,7 +688,7 @@ with st.expander("View stock universe", expanded=False):
 
 
 # ============================================================
-# STEP 2 — STA SCREEN
+# STEP 2 — STA
 # ============================================================
 
 st.divider()
@@ -819,10 +698,9 @@ st.markdown(
     """
     **Definition:** STA = (Net Income − Operating Cash Flow) / Total Assets.
 
-    Lower STA is generally preferred in this screen. The selected threshold
-    is applied in both directions: sufficiently negative values can qualify
-    as BUY signals, while sufficiently positive values can qualify as SELL
-    signals.
+    Lower STA is treated as better in this screen. Values at or below the
+    negative threshold can qualify as BUY signals; values at or above the
+    positive threshold can qualify as SELL signals.
     """
 )
 
@@ -835,7 +713,7 @@ show_metric_table(
 
 
 # ============================================================
-# STEP 3 — SNOA SCREEN
+# STEP 3 — SNOA
 # ============================================================
 
 st.divider()
@@ -846,7 +724,7 @@ st.markdown(
     **Definition:** SNOA = (Operating Assets − Operating Liabilities) /
     Total Assets.
 
-    Lower SNOA is treated as the preferred direction for this screen.
+    Lower SNOA is treated as better in this screen.
     """
 )
 
@@ -867,13 +745,13 @@ st.header("Step 4 — Altman Z-Score")
 
 st.markdown(
     """
-    The manufacturing Altman Z-Score combines working capital, retained
-    earnings, EBIT, market equity relative to liabilities, and sales relative
-    to assets. Higher scores indicate a stronger financial position under
-    this model.
+    The manufacturing Altman Z-Score uses working capital, retained
+    earnings, EBIT, market equity relative to liabilities, and sales
+    relative to assets. Higher scores generally indicate a stronger
+    financial position under this model.
 
-    The traditional reference points are **2.99** for the safe zone and
-    **1.81** for the distress zone. You can change these thresholds above.
+    Traditional reference points are 2.99 for the safe zone and 1.81
+    for the distress zone. Adjust these in the sidebar.
     """
 )
 
@@ -884,11 +762,11 @@ show_metric_table(
     "Z_SELL",
 )
 
-z_data = scored_data["Altman_Z"].dropna()
+z_values = scored_data["Altman_Z"].dropna()
 
-if not z_data.empty:
+if not z_values.empty:
     fig_z = px.histogram(
-        x=z_data,
+        x=z_values,
         nbins=40,
         title="Distribution of Altman Z-Scores",
         labels={"x": "Altman Z-Score", "count": "Companies"},
@@ -919,9 +797,9 @@ st.markdown(
     """
     **Definition:** Gross Profitability = Gross Profit / Total Assets.
 
-    Higher gross profitability is treated as better. The BUY threshold is
-    controlled by the Gross Profitability slider. Negative values are marked
-    as SELL signals.
+    Higher Gross Profitability is treated as better. The minimum BUY
+    threshold is controlled by the sidebar slider. Negative values qualify
+    as SELL signals in this screening rule.
     """
 )
 
@@ -932,11 +810,11 @@ show_metric_table(
     "GPA_SELL",
 )
 
-gpa_data = scored_data["Gross_Profitability"].dropna()
+gpa_values = scored_data["Gross_Profitability"].dropna()
 
-if not gpa_data.empty:
+if not gpa_values.empty:
     fig_gpa = px.histogram(
-        x=gpa_data * 100,
+        x=gpa_values * 100,
         nbins=40,
         title="Distribution of Gross Profitability",
         labels={"x": "Gross Profitability (%)", "count": "Companies"},
@@ -952,7 +830,7 @@ if not gpa_data.empty:
 
 
 # ============================================================
-# STEP 6 — COMBINED CLASSIFICATION
+# STEP 6 — COMBINED SCREEN
 # ============================================================
 
 st.divider()
@@ -960,13 +838,13 @@ st.header("Step 6 — Combined Screening Results")
 
 st.markdown(
     """
-    Each company can receive up to four individual BUY signals and four
-    individual SELL signals: Gross Profitability, STA, SNOA, and Altman Z.
+    Each company can receive four individual BUY signals and four individual
+    SELL signals: STA, SNOA, Altman Z-Score, and Gross Profitability.
 
-    A combined **BUY** requires at least the selected minimum number of
-    BUY signals and no SELL signals. A combined **SELL** requires at least
-    the selected minimum number of SELL signals and no BUY signals.
-    Other companies are classified as **NEUTRAL**.
+    A combined BUY requires the selected minimum number of BUY signals and
+    no SELL signals. A combined SELL requires the selected minimum number
+    of SELL signals and no BUY signals. Companies that do not meet either
+    rule are classified as NEUTRAL.
     """
 )
 
@@ -976,10 +854,10 @@ result_counts = (
     .reindex(["BUY", "SELL", "NEUTRAL"], fill_value=0)
 )
 
-r1, r2, r3 = st.columns(3)
-r1.metric("BUY", f"{int(result_counts['BUY']):,}")
-r2.metric("SELL", f"{int(result_counts['SELL']):,}")
-r3.metric("NEUTRAL", f"{int(result_counts['NEUTRAL']):,}")
+c1, c2, c3 = st.columns(3)
+c1.metric("BUY", f"{int(result_counts['BUY']):,}")
+c2.metric("SELL", f"{int(result_counts['SELL']):,}")
+c3.metric("NEUTRAL", f"{int(result_counts['NEUTRAL']):,}")
 
 fig_results = px.bar(
     x=result_counts.index,
@@ -991,7 +869,7 @@ fig_results = px.bar(
 st.plotly_chart(fig_results, use_container_width=True)
 
 combined_filter = st.selectbox(
-    "Choose which combined results to view",
+    "Choose results to view",
     ["All companies", "BUY", "SELL", "NEUTRAL"],
 )
 
@@ -1068,8 +946,6 @@ sell_candidates = sell_candidates.sort_values(
 top_buy = buy_candidates.head(10)
 top_sell = sell_candidates.head(10)
 
-buy_tab, sell_tab = st.tabs(["Top 10 BUY", "Top 10 SELL"])
-
 top_columns = [
     column for column in [
         "Rank",
@@ -1087,6 +963,8 @@ top_columns = [
     if column in scored_data.columns
 ]
 
+buy_tab, sell_tab = st.tabs(["Top 10 BUY", "Top 10 SELL"])
+
 with buy_tab:
     if top_buy.empty:
         st.info("No companies currently meet the combined BUY criteria.")
@@ -1096,6 +974,7 @@ with buy_tab:
             use_container_width=True,
             hide_index=True,
         )
+
         st.download_button(
             "Download Top 10 BUY",
             data=export_csv(top_buy),
@@ -1112,6 +991,7 @@ with sell_tab:
             use_container_width=True,
             hide_index=True,
         )
+
         st.download_button(
             "Download Top 10 SELL",
             data=export_csv(top_sell),
@@ -1128,6 +1008,7 @@ st.divider()
 st.header("Company Explorer")
 
 company_options = scored_data.copy()
+
 company_options["_label"] = (
     company_options["Ticker"].astype(str)
     + " — "
@@ -1142,117 +1023,98 @@ if not company_options.empty:
         company_options["_label"].tolist(),
     )
 
-    selected_company = company_options[
+    company = company_options[
         company_options["_label"] == selected_label
     ].iloc[0]
 
-    st.subheader(
-        f"{selected_company['Ticker']} — {selected_company['Name']}"
-    )
+    st.subheader(f"{company['Ticker']} — {company['Name']}")
 
-    e1, e2, e3, e4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-    e1.metric(
+    c1.metric(
         "Market Cap",
-        format_market_cap(selected_company.get("Market Cap", np.nan)),
+        format_market_cap(company.get("Market Cap", np.nan)),
     )
-    e2.metric(
+    c2.metric(
         "Gross Profitability",
-        format_percent(selected_company.get("Gross_Profitability", np.nan)),
+        format_percent(company.get("Gross_Profitability", np.nan)),
     )
-    e3.metric(
-        "STA",
-        format_percent(selected_company.get("STA", np.nan)),
-    )
-    e4.metric(
-        "SNOA",
-        format_percent(selected_company.get("SNOA", np.nan)),
-    )
+    c3.metric("STA", format_percent(company.get("STA", np.nan)))
+    c4.metric("SNOA", format_percent(company.get("SNOA", np.nan)))
 
-    e5, e6, e7 = st.columns(3)
+    c5, c6, c7 = st.columns(3)
 
-    z_value = selected_company.get("Altman_Z", np.nan)
+    z_value = company.get("Altman_Z", np.nan)
 
-    e5.metric(
+    c5.metric(
         "Altman Z-Score",
         "—" if pd.isna(z_value) else f"{z_value:.2f}",
     )
-    e6.metric(
-        "BUY signals",
-        int(selected_company["BUY_Signals"]),
-    )
-    e7.metric(
-        "SELL signals",
-        int(selected_company["SELL_Signals"]),
+    c6.metric("BUY signals", int(company["BUY_Signals"]))
+    c7.metric("SELL signals", int(company["SELL_Signals"]))
+
+    st.write("**Combined classification:**", company["Combined_Result"])
+
+    detail = pd.DataFrame(
+        {
+            "Metric": [
+                "STA",
+                "SNOA",
+                "Altman Z-Score",
+                "Gross Profitability",
+            ],
+            "Value": [
+                company.get("STA", np.nan),
+                company.get("SNOA", np.nan),
+                company.get("Altman_Z", np.nan),
+                company.get("Gross_Profitability", np.nan),
+            ],
+            "BUY signal": [
+                bool(company["STA_BUY"]),
+                bool(company["SNOA_BUY"]),
+                bool(company["Z_BUY"]),
+                bool(company["GPA_BUY"]),
+            ],
+            "SELL signal": [
+                bool(company["STA_SELL"]),
+                bool(company["SNOA_SELL"]),
+                bool(company["Z_SELL"]),
+                bool(company["GPA_SELL"]),
+            ],
+        }
     )
 
-    st.write(
-        "**Combined classification:**",
-        selected_company["Combined_Result"],
-    )
+    def format_detail_value(row):
+        value = row["Value"]
 
-    details = {
-        "Metric": [
-            "Gross Profitability",
-            "STA",
-            "SNOA",
-            "Altman Z-Score",
-        ],
-        "Value": [
-            selected_company.get("Gross_Profitability", np.nan),
-            selected_company.get("STA", np.nan),
-            selected_company.get("SNOA", np.nan),
-            selected_company.get("Altman_Z", np.nan),
-        ],
-        "Individual BUY signal": [
-            bool(selected_company["GPA_BUY"]),
-            bool(selected_company["STA_BUY"]),
-            bool(selected_company["SNOA_BUY"]),
-            bool(selected_company["Z_BUY"]),
-        ],
-        "Individual SELL signal": [
-            bool(selected_company["GPA_SELL"]),
-            bool(selected_company["STA_SELL"]),
-            bool(selected_company["SNOA_SELL"]),
-            bool(selected_company["Z_SELL"]),
-        ],
-    }
+        if pd.isna(value):
+            return "—"
 
-    detail_frame = pd.DataFrame(details)
+        if row["Metric"] == "Altman Z-Score":
+            return f"{value:.2f}"
 
-    detail_frame["Value"] = detail_frame.apply(
-        lambda row: (
-            "—"
-            if pd.isna(row["Value"])
-            else (
-                f"{row['Value']:.2f}"
-                if row["Metric"] == "Altman Z-Score"
-                else format_percent(row["Value"])
-            )
-        ),
-        axis=1,
-    )
+        return format_percent(value)
+
+    detail["Value"] = detail.apply(format_detail_value, axis=1)
 
     st.dataframe(
-        detail_frame,
+        detail,
         use_container_width=True,
         hide_index=True,
     )
 
 
 # ============================================================
-# METHODOLOGY AND DATA COVERAGE
+# METHODOLOGY AND COVERAGE
 # ============================================================
 
 st.divider()
 st.header("Methodology and Data Coverage")
 
-with st.expander("Metric definitions", expanded=False):
+with st.expander("Metric definitions"):
     st.markdown(
         """
-        **Altman Z-Score**
-
-        The manufacturing version of the Altman Z-Score is calculated as:
+        **Altman Z-Score (manufacturing model)**
 
         - 1.2 × working capital / total assets
         - 1.4 × retained earnings / total assets
@@ -1260,59 +1122,50 @@ with st.expander("Metric definitions", expanded=False):
         - 0.6 × market equity / total liabilities
         - 1.0 × sales / total assets
 
-        The supplied Z-Score is used when available. This app does not
-        independently reconstruct the score if the required inputs are absent.
+        The app uses the supplied Altman Z-Score values.
 
         **STA**
 
-        STA = (Net Income − Operating Cash Flow) / Total Assets.
-        Lower values are treated as better by this screen.
+        (Net Income − Operating Cash Flow) / Total Assets.
 
         **SNOA**
 
-        SNOA = (Operating Assets − Operating Liabilities) / Total Assets.
-        Lower values are treated as better by this screen.
+        (Operating Assets − Operating Liabilities) / Total Assets.
 
         **Gross Profitability**
 
-        Gross Profitability = Gross Profit / Total Assets.
-        Higher values are treated as better by this screen.
+        Gross Profit / Total Assets.
 
-        **Combined screen**
+        **Combined classification**
 
-        The combined classification uses the four individual metric signals.
-        A company with both BUY and SELL signals does not qualify for either
-        combined category under the current rule.
+        A company must meet the selected minimum signal count in one
+        direction and have zero signals in the opposite direction to
+        receive a combined BUY or SELL classification.
         """
     )
 
-with st.expander("Data coverage and missing values", expanded=False):
+with st.expander("Data coverage and missing values"):
     st.write(
-        "Coverage is calculated using the current market-cap-filtered "
-        "universe. Missing metric values are excluded from that metric's "
-        "individual screen."
+        "Coverage below reflects the current market-cap-filtered universe. "
+        "Missing metric values are excluded from that metric's individual "
+        "screen."
     )
     show_coverage(filtered_data)
 
-with st.expander("Screening limitations", expanded=False):
+with st.expander("Screening limitations"):
     st.markdown(
         """
-        - These screens are quantitative filters, not personalized investment
-          advice or a guarantee of future performance.
-        - The thresholds are configurable and can materially change the
-          number of companies classified as BUY or SELL.
-        - Missing or outdated financial data can affect the results.
-        - The Altman Z-Score was designed for a particular financial-distress
-          context and may not be equally appropriate for every industry.
-        - The STA and SNOA signal directions used here are screening choices;
-          they should be evaluated alongside other financial information.
-        - Market-cap and financial data may come from different dates.
-        - A BUY or SELL label is a screen result, not a recommendation to
-          purchase or sell a security.
+        - These quantitative screens do not guarantee future performance.
+        - Thresholds are configurable and materially affect classifications.
+        - Missing or outdated financial data may affect results.
+        - Altman Z-Score may be less suitable for some industries.
+        - The BUY and SELL directions for STA and SNOA are screening choices
+          that should be evaluated alongside other financial information.
+        - Market-cap and financial data may reflect different dates.
+        - A screen result is not personalized investment advice.
         """
     )
 
 st.caption(
-    "Screening outputs depend on the data in universe.csv and the "
-    "thresholds selected above."
+    "Results depend on the data in universe.csv and the selected sidebar filters."
 )
