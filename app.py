@@ -73,7 +73,7 @@ def initialize_settings():
 
 
 def sync_setting(setting, source_key):
-    """Synchronize both widget copies before Streamlit reruns the app."""
+    """Keep sidebar and main-page copies of each slider synchronized."""
     value = st.session_state[source_key]
     st.session_state[setting] = value
 
@@ -89,7 +89,7 @@ initialize_settings()
 # ============================================================
 
 def parse_market_cap(value):
-    """Convert values such as $2.4T, $850B and $45.2M to USD."""
+    """Convert values such as $2.4T, $850B and $45.2M to numeric USD."""
     if pd.isna(value):
         return np.nan
 
@@ -329,8 +329,8 @@ def clean_chart(fig, height=360):
 
 def percentile_flags(series, percentile, higher_is_better):
     """
-    Return BUY and SELL flags based on the tails of valid observations.
-    Missing metrics receive no signal.
+    Return BUY and SELL flags from the tails of valid observations.
+    Missing metric values receive no signal.
     """
     buy = pd.Series(False, index=series.index)
     sell = pd.Series(False, index=series.index)
@@ -379,6 +379,7 @@ if cap_max <= cap_min:
 
 def add_cap_slider(location):
     key = "cap_sidebar" if location == "sidebar" else "cap_main"
+
     st.slider(
         "Minimum market capitalization (USD)",
         min_value=cap_min,
@@ -393,6 +394,7 @@ def add_cap_slider(location):
 
 def add_percent_slider(setting, location, label, maximum=25):
     key = f"{setting}_{location}"
+
     st.slider(
         label,
         min_value=1,
@@ -406,6 +408,7 @@ def add_percent_slider(setting, location, label, maximum=25):
 
 def add_z_slider(setting, location, label, low, high):
     key = f"{setting}_{location}"
+
     st.slider(
         label,
         min_value=low,
@@ -524,10 +527,17 @@ def score_companies(universe):
     )
 
     buy_columns = [
-        "GPA_BUY", "STA_BUY", "SNOA_BUY", "ALTMAN_BUY"
+        "GPA_BUY",
+        "STA_BUY",
+        "SNOA_BUY",
+        "ALTMAN_BUY",
     ]
+
     sell_columns = [
-        "GPA_SELL", "STA_SELL", "SNOA_SELL", "ALTMAN_SELL"
+        "GPA_SELL",
+        "STA_SELL",
+        "SNOA_SELL",
+        "ALTMAN_SELL",
     ]
 
     result["Buy Signals"] = result[buy_columns].sum(axis=1)
@@ -541,6 +551,7 @@ def score_companies(universe):
         (result["Buy Signals"] >= minimum)
         & (result["Buy Signals"] > result["Sell Signals"])
     )
+
     sell_mask = (
         (result["Sell Signals"] >= minimum)
         & (result["Sell Signals"] > result["Buy Signals"])
@@ -552,16 +563,19 @@ def score_companies(universe):
     return result
 
 
-# Critical: score after reading the current widget settings.
-# Every screen below uses this same dataframe.
+# Recompute using the current settings on every rerun.
 scored_data = score_companies(data)
 
 
 # ============================================================
-# INDIVIDUAL SCREEN TABLE FUNCTION
+# INDIVIDUAL METRIC TABLE
 # ============================================================
 
 def show_metric_table(data_with_signals, metric, buy_col, sell_col):
+    """
+    Show companies currently qualifying for the individual metric's
+    BUY or SELL signal. This is independent of the combined classification.
+    """
     required = [metric, buy_col, sell_col]
     missing = [
         column for column in required
@@ -569,10 +583,7 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
     ]
 
     if missing:
-        st.error(
-            "Required screen columns are missing: "
-            + ", ".join(missing)
-        )
+        st.error("Missing screen columns: " + ", ".join(missing))
         return
 
     valid = data_with_signals[
@@ -581,26 +592,58 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
 
     missing_count = int(data_with_signals[metric].isna().sum())
 
-    col1, col2 = st.columns(2)
-    col1.metric("Valid observations", f"{len(valid):,}")
-    col2.metric("Missing observations", f"{missing_count:,}")
+    # Include only companies that currently qualify for this screen.
+    buy_candidates = valid[valid[buy_col].fillna(False)].copy()
+    sell_candidates = valid[valid[sell_col].fillna(False)].copy()
 
-    if valid.empty:
-        st.info("No valid observations are available for this screen.")
-        return
+    candidates = pd.concat(
+        [buy_candidates, sell_candidates],
+        axis=0,
+    ).drop_duplicates()
 
-    valid["Screen Result"] = np.select(
-        [valid[buy_col], valid[sell_col]],
-        ["BUY signal", "SELL signal"],
-        default="No signal",
+    candidates["Screen Result"] = np.where(
+        candidates[buy_col].fillna(False),
+        "BUY signal",
+        np.where(
+            candidates[sell_col].fillna(False),
+            "SELL signal",
+            "No signal",
+        ),
     )
 
-    ascending = metric != "Gross_Profitability"
-    valid = valid.sort_values(
-        metric,
-        ascending=ascending,
+    # GPA and Altman Z: higher values are preferred.
+    # STA and SNOA: lower values are preferred.
+    higher_is_better = metric in [
+        "Gross_Profitability",
+        "Altman_Z",
+    ]
+
+    # Put BUY candidates first and rank each group by the metric.
+    candidates["_signal_order"] = np.where(
+        candidates["Screen Result"] == "BUY signal",
+        0,
+        1,
+    )
+
+    candidates["_metric_order"] = candidates[metric]
+
+    candidates = candidates.sort_values(
+        ["_signal_order", "_metric_order"],
+        ascending=[True, not higher_is_better],
         na_position="last",
-    )
+    ).drop(columns=["_signal_order", "_metric_order"])
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Valid observations", f"{len(valid):,}")
+    c2.metric("Missing observations", f"{missing_count:,}")
+    c3.metric("BUY candidates", f"{int(valid[buy_col].sum()):,}")
+    c4.metric("SELL candidates", f"{int(valid[sell_col].sum()):,}")
+
+    if candidates.empty:
+        st.info(
+            "No companies currently meet this metric's BUY or SELL criteria."
+        )
+        return
 
     columns = [
         column for column in [
@@ -611,21 +654,22 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
             metric,
             "Screen Result",
         ]
-        if column in valid.columns
+        if column in candidates.columns
     ]
 
     st.dataframe(
-        display_table(valid, columns),
+        display_table(candidates, columns),
         use_container_width=True,
         hide_index=True,
     )
 
 
 # ============================================================
-# STEP 1 — UNIVERSE
+# STEP 1 — INVESTMENT UNIVERSE
 # ============================================================
 
 st.header("Step 1 — Investment Universe")
+
 st.markdown(
     "Filter the supplied manufacturing-firm universe by market "
     "capitalization. The size filter defines which firms enter the "
@@ -635,6 +679,7 @@ st.markdown(
 add_cap_slider("main")
 
 u1, u2, u3 = st.columns(3)
+
 u1.metric("Firms in source dataset", f"{len(df_original):,}")
 u2.metric("Firms in current universe", f"{len(data):,}")
 u3.metric(
@@ -675,7 +720,12 @@ st.caption(
     f"Current cutoff: {st.session_state['sta_pct']}% at each end."
 )
 
-show_metric_table(scored_data, "STA", "STA_BUY", "STA_SELL")
+show_metric_table(
+    scored_data,
+    "STA",
+    "STA_BUY",
+    "STA_SELL",
+)
 
 
 # ============================================================
@@ -704,7 +754,12 @@ st.caption(
     f"Current cutoff: {st.session_state['snoa_pct']}% at each end."
 )
 
-show_metric_table(scored_data, "SNOA", "SNOA_BUY", "SNOA_SELL")
+show_metric_table(
+    scored_data,
+    "SNOA",
+    "SNOA_BUY",
+    "SNOA_SELL",
+)
 
 
 # ============================================================
@@ -729,46 +784,38 @@ zc1, zc2 = st.columns(2)
 
 with zc1:
     add_z_slider(
-        "safe_z", "main", "Safe-zone threshold", 2.0, 4.0
+        "safe_z",
+        "main",
+        "Safe-zone threshold",
+        2.0,
+        4.0,
     )
 
 with zc2:
     add_z_slider(
-        "distress_z", "main", "Distress threshold", 0.5, 2.5
+        "distress_z",
+        "main",
+        "Distress threshold",
+        0.5,
+        2.5,
     )
 
 if st.session_state["distress_z"] >= st.session_state["safe_z"]:
     st.error("The distress threshold must be below the safe-zone threshold.")
     st.stop()
 
+# The Z table uses the same current-signal logic as the other metric tables.
+show_metric_table(
+    scored_data,
+    "Altman_Z",
+    "ALTMAN_BUY",
+    "ALTMAN_SELL",
+)
+
+# Keep the original distribution chart.
 z_valid = scored_data[scored_data["Altman_Z"].notna()].copy()
 
-z1, z2, z3 = st.columns(3)
-z1.metric("Valid Z-Scores", f"{len(z_valid):,}")
-z2.metric("BUY signals", f"{int(z_valid['ALTMAN_BUY'].sum()):,}")
-z3.metric("SELL signals", f"{int(z_valid['ALTMAN_SELL'].sum()):,}")
-
 if not z_valid.empty:
-    z_valid["Screen Result"] = np.select(
-        [z_valid["ALTMAN_BUY"], z_valid["ALTMAN_SELL"]],
-        ["BUY signal", "SELL signal"],
-        default="Neutral",
-    )
-
-    zcols = [
-        column for column in [
-            "Rank", "Ticker", "Name", "Market Cap",
-            "Altman_Z", "Screen Result",
-        ]
-        if column in z_valid.columns
-    ]
-
-    st.dataframe(
-        display_table(z_valid, zcols),
-        use_container_width=True,
-        hide_index=True,
-    )
-
     fig_z = px.histogram(
         z_valid,
         x="Altman_Z",
@@ -784,6 +831,7 @@ if not z_valid.empty:
         annotation_text="Distress",
         annotation_position="top left",
     )
+
     fig_z.add_vline(
         x=st.session_state["safe_z"],
         line_dash="dash",
@@ -860,6 +908,9 @@ st.slider(
     args=("min_signals", "signals_main"),
 )
 
+# Recalculate classification using the current minimum-signal setting.
+scored_data = score_companies(data)
+
 counts = (
     scored_data["Classification"]
     .value_counts()
@@ -867,6 +918,7 @@ counts = (
 )
 
 cc1, cc2, cc3 = st.columns(3)
+
 cc1.metric("BUY", f"{counts['BUY']:,}")
 cc2.metric("NEUTRAL", f"{counts['NEUTRAL']:,}")
 cc3.metric("SELL", f"{counts['SELL']:,}")
@@ -1039,6 +1091,7 @@ with buy_tab:
             use_container_width=True,
             hide_index=True,
         )
+
         st.download_button(
             "Download Top 10 BUY",
             data=buy_top10.to_csv(index=False).encode("utf-8"),
@@ -1056,6 +1109,7 @@ with sell_tab:
             use_container_width=True,
             hide_index=True,
         )
+
         st.download_button(
             "Download Top 10 SELL",
             data=sell_top10.to_csv(index=False).encode("utf-8"),
@@ -1079,10 +1133,16 @@ search_text = st.text_input(
 if search_text.strip():
     match_mask = (
         scored_data["Ticker"].str.contains(
-            search_text, case=False, na=False, regex=False
+            search_text,
+            case=False,
+            na=False,
+            regex=False,
         )
         | scored_data["Name"].str.contains(
-            search_text, case=False, na=False, regex=False
+            search_text,
+            case=False,
+            na=False,
+            regex=False,
         )
     )
 
@@ -1118,6 +1178,7 @@ if search_text.strip():
             st.subheader(f"{company['Name']} ({company['Ticker']})")
 
             details = st.columns(4)
+
             details[0].metric(
                 "Market Cap",
                 format_market_cap(company["Market Cap"]),
@@ -1126,13 +1187,20 @@ if search_text.strip():
                 "GPA",
                 format_number(company["Gross_Profitability"]),
             )
-            details[2].metric("STA", format_number(company["STA"]))
-            details[3].metric("SNOA", format_number(company["SNOA"]))
+            details[2].metric(
+                "STA",
+                format_number(company["STA"]),
+            )
+            details[3].metric(
+                "SNOA",
+                format_number(company["SNOA"]),
+            )
 
             st.write(
                 f"**Altman Z-Score:** "
                 f"{format_number(company['Altman_Z'])}"
             )
+
             st.write(
                 f"**BUY signals:** {int(company['Buy Signals'])} | "
                 f"**SELL signals:** {int(company['Sell Signals'])} | "
