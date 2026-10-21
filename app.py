@@ -55,7 +55,7 @@ DEFAULTS = {
     "min_signals": 2,
 }
 
-# Sidebar-only widgets: no duplicate controls on the main page.
+# All controls are in the sidebar; no duplicate main-page sliders.
 WIDGET_KEYS = {
     "min_market_cap": ["cap_sidebar"],
     "sta_pct": ["sta_pct_sidebar"],
@@ -137,7 +137,7 @@ def format_percent(value):
 
 
 def display_table(frame, columns):
-    """Format ratios for display while preserving the underlying numeric data."""
+    """Format ratios for display while preserving underlying numeric data."""
     result = frame[columns].copy()
 
     if "Market Cap" in result.columns:
@@ -289,7 +289,11 @@ def add_cap_slider():
         key=key,
         on_change=sync_setting,
         args=("min_market_cap", key),
-        help="Exclude companies below the selected market capitalization.",
+        help=(
+            "Market capitalization is the total market value of a company's "
+            "outstanding shares. A setting of $10 billion excludes companies "
+            "with market capitalization below $10B."
+        ),
     )
 
 
@@ -308,7 +312,14 @@ def add_percent_slider(setting, label, help_text):
     )
 
 
-def add_z_slider(setting, label, min_value, max_value, step):
+def add_z_slider(
+    setting,
+    label,
+    min_value,
+    max_value,
+    step,
+    help_text,
+):
     key = f"{setting}_sidebar"
 
     st.slider(
@@ -319,6 +330,7 @@ def add_z_slider(setting, label, min_value, max_value, step):
         key=key,
         on_change=sync_setting,
         args=(setting, key),
+        help=help_text,
     )
 
 
@@ -334,8 +346,9 @@ def add_signal_slider():
         on_change=sync_setting,
         args=("min_signals", key),
         help=(
-            "Minimum number of matching signals required for a combined "
-            "classification."
+            "How many of the four metrics must produce a signal in the same "
+            "direction. A company must also have no signals in the opposite "
+            "direction to qualify for a combined BUY or SELL."
         ),
     )
 
@@ -346,62 +359,149 @@ def add_signal_slider():
 
 with st.sidebar:
     st.header("Screen Filters")
+
     st.caption(
-        "Adjust the filters below to update the screening results."
+        "These settings adjust the screening rules and determine which "
+        "companies qualify for each result."
     )
 
+    # STEP 1 — STOCK UNIVERSE
     st.subheader("Step 1 — Stock Universe")
+
     add_cap_slider()
+
+    st.caption(
+        "Sets the minimum total market value of a company's outstanding "
+        "shares. Companies below the selected value are excluded from "
+        "the active universe."
+    )
 
     st.divider()
 
+    # STEP 2 — STA
     st.subheader("Step 2 — STA (Accruals)")
+
     add_percent_slider(
         "sta_pct",
         "STA threshold (%)",
-        "Lower STA is treated as better by this screening rule.",
+        (
+            "STA = (Net Income − Operating Cash Flow) / Total Assets. "
+            "The percentage is the difference between net income and "
+            "operating cash flow relative to total assets. At 10%, "
+            "STA ≤ −10% qualifies for a BUY signal and STA ≥ +10% "
+            "qualifies for a SELL signal."
+        ),
+    )
+
+    st.caption(
+        "**What does the percentage mean?** STA is the difference between "
+        "net income and operating cash flow divided by total assets. "
+        "A 10% threshold means that difference must be at least 10% of "
+        "total assets in the relevant direction."
     )
 
     st.divider()
 
+    # STEP 3 — SNOA
     st.subheader("Step 3 — SNOA")
+
     add_percent_slider(
         "snoa_pct",
         "SNOA threshold (%)",
-        "Lower SNOA is treated as better by this screening rule.",
+        (
+            "SNOA = (Operating Assets − Operating Liabilities) / Total Assets. "
+            "The percentage expresses net operating assets relative to "
+            "total assets. At 10%, SNOA ≤ −10% qualifies for a BUY signal "
+            "and SNOA ≥ +10% qualifies for a SELL signal."
+        ),
+    )
+
+    st.caption(
+        "**What does the percentage mean?** SNOA measures net operating "
+        "assets as a proportion of total assets. A 10% threshold means "
+        "SNOA must be at or below −10% for a BUY signal, or at or above "
+        "+10% for a SELL signal."
     )
 
     st.divider()
 
+    # STEP 4 — ALTMAN Z-SCORE
     st.subheader("Step 4 — Altman Z-Score")
+
     add_z_slider(
         "safe_z",
         "Safe-zone threshold",
         1.0,
         5.0,
         0.01,
+        (
+            "The minimum Altman Z-Score for an individual BUY signal. "
+            "The traditional manufacturing-model safe-zone reference "
+            "point is 2.99. This is a score, not a percentage."
+        ),
     )
+
+    st.caption(
+        "Companies with an Altman Z-Score at or above this value receive "
+        "an individual BUY signal."
+    )
+
     add_z_slider(
         "distress_z",
         "Distress threshold",
         0.5,
         3.0,
         0.01,
+        (
+            "The maximum Altman Z-Score for an individual SELL signal. "
+            "The traditional manufacturing-model distress-zone reference "
+            "point is 1.81. This is a score, not a percentage."
+        ),
+    )
+
+    st.caption(
+        "Companies with an Altman Z-Score at or below this value receive "
+        "an individual SELL signal. Keep this threshold below the safe-zone "
+        "threshold to maintain a clear separation between the two rules."
     )
 
     st.divider()
 
+    # STEP 5 — GROSS PROFITABILITY
     st.subheader("Step 5 — Gross Profitability")
+
     add_percent_slider(
         "gpa_pct",
         "Minimum Gross Profitability (%)",
-        "Higher Gross Profitability is treated as better.",
+        (
+            "Gross Profitability = Gross Profit / Total Assets. "
+            "This is gross profit expressed as a percentage of total assets. "
+            "At 10%, a company needs gross profit equal to at least 10% "
+            "of its total assets to receive a BUY signal."
+        ),
+    )
+
+    st.caption(
+        "**What does the percentage mean?** Gross Profitability is gross "
+        "profit divided by total assets. For example, 10% means $0.10 of "
+        "gross profit for each $1.00 of assets. Values at or above the "
+        "selected threshold receive a BUY signal; negative values receive "
+        "a SELL signal under this screen's rules."
     )
 
     st.divider()
 
+    # STEP 6 — COMBINED SCREEN
     st.subheader("Step 6 — Combined Screen")
+
     add_signal_slider()
+
+    st.caption(
+        "**What does the number mean?** Selecting 3 means a company needs "
+        "at least three BUY signals and no SELL signals to qualify for a "
+        "combined BUY classification. The same requirement applies in "
+        "the SELL direction."
+    )
 
     st.divider()
 
@@ -1115,14 +1215,8 @@ if not company_options.empty:
         "Gross Profitability",
         format_percent(company.get("Gross_Profitability", np.nan)),
     )
-    c3.metric(
-        "STA",
-        format_percent(company.get("STA", np.nan)),
-    )
-    c4.metric(
-        "SNOA",
-        format_percent(company.get("SNOA", np.nan)),
-    )
+    c3.metric("STA", format_percent(company.get("STA", np.nan)))
+    c4.metric("SNOA", format_percent(company.get("SNOA", np.nan)))
 
     c5, c6, c7 = st.columns(3)
 
@@ -1277,7 +1371,7 @@ with st.expander("Interpretation and limitations"):
     )
 
 st.caption(
-    "Screening results are generated from universe.csv using the "
-    "selected sidebar filters. Review the methodology and data coverage "
-    "before interpreting classifications."
+    "Screening results are generated from universe.csv using the selected "
+    "sidebar filters. Review the methodology and data coverage before "
+    "interpreting classifications."
 )
