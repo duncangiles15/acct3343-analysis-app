@@ -1598,7 +1598,7 @@ with st.expander(
         """
         Where:
 
-        - \(N_{\text{valid}}\) is the number of companies entering the
+        - \(NValid\) is the number of companies entering the
           stage with a non-missing value for the required metric.
         - \(p\) is the selected retention percentage.
         - The floor operation rounds down to the nearest whole company.
