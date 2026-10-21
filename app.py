@@ -854,7 +854,7 @@ with st.expander("View Stock Universe"):
 # SECTION 2 — STA
 # ============================================================
 
-st.header("2. Sloan's T Accruals (STA)")
+st.header("2. Earnings Quality - (STA)")
 
 st.markdown(
     """
