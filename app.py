@@ -23,10 +23,10 @@ st.markdown(
     This dashboard screens manufacturing companies using financial health,
     earnings quality, operating asset quality, and gross profitability.
 
-    The **sequential funnel** identifies companies meeting the selected
+    The **sequential funnel** identifies companies that pass the selected
     criteria. The **Top 10 BUY and SELL lists** rank companies using a
-    composite quality score. These are screening results, not personalized
-    investment recommendations.
+    composite quality score. These are screening outputs, not investment
+    recommendations.
     """
 )
 
@@ -39,6 +39,7 @@ st.markdown(
 def load_data():
     df = pd.read_csv("universe.csv")
 
+    # Ensure required columns exist.
     required_columns = [
         "Name",
         "Market Cap",
@@ -72,6 +73,7 @@ def load_data():
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     def parse_market_cap(value):
+        """Convert values such as $2.4T, $850B, and $45.2M to dollars."""
         if pd.isna(value):
             return np.nan
 
@@ -107,6 +109,7 @@ def load_data():
 
     df["Market_Cap_Value"] = df["Market Cap"].apply(parse_market_cap)
 
+    # Normalize ticker columns and create one display ticker.
     df["Ticker"] = df["Ticker"].fillna("").astype(str).str.strip()
     df["Ticker_guess"] = (
         df["Ticker_guess"].fillna("").astype(str).str.strip()
@@ -141,8 +144,7 @@ if data.empty:
 
 st.sidebar.title("Screen Controls")
 st.sidebar.caption(
-    "Adjust the funnel criteria. Percentile thresholds are calculated "
-    "from the market-cap-eligible universe."
+    "Each stage filters the companies that survived the previous stage."
 )
 
 max_market_cap_b = data["Market_Cap_Value"].max() / 1_000_000_000
@@ -170,7 +172,7 @@ min_altman_z = st.sidebar.number_input(
     step=0.1,
     help=(
         "The commonly cited manufacturing distress boundary is 1.81. "
-        "This rule excludes companies below the selected value."
+        "This screen excludes companies below the selected value."
     ),
 )
 
@@ -182,7 +184,7 @@ keep_lowest_sta = st.sidebar.slider(
     max_value=90,
     value=50,
     step=5,
-    help="Lower STA is preferred by this screen.",
+    help="Lower STA is preferred by this screening rule.",
 )
 
 st.sidebar.subheader("3. Operating Asset Quality")
@@ -193,7 +195,7 @@ keep_lowest_snoa = st.sidebar.slider(
     max_value=90,
     value=50,
     step=5,
-    help="Lower SNOA is preferred by this screen.",
+    help="Lower SNOA is preferred by this screening rule.",
 )
 
 st.sidebar.subheader("4. Gross Profitability")
@@ -204,7 +206,7 @@ keep_highest_gp = st.sidebar.slider(
     max_value=90,
     value=50,
     step=5,
-    help="Higher gross profitability is preferred by this screen.",
+    help="Higher gross profitability is preferred by this screening rule.",
 )
 
 if st.sidebar.button("Reset screening controls"):
@@ -235,16 +237,14 @@ if eligible.empty:
 # 5. COMPOSITE QUALITY SCORE
 # ============================================================
 
-# All four metrics are converted to percentile scores from 0 to 100.
-# A higher score always means a more favourable result for that metric.
-#
+# Higher percentile scores always mean more favourable results:
 # Altman Z: higher is better.
 # STA: lower is better.
 # SNOA: lower is better.
 # Gross Profitability: higher is better.
 #
-# Each metric receives equal weight. Only companies with all four
-# metrics are eligible for the composite ranking.
+# All four metrics are equally weighted. Companies must have all four
+# metrics to receive a composite score.
 
 METRICS = [
     "Altman_Z",
@@ -262,12 +262,12 @@ def add_quality_scores(df):
     )
 
     result["STA_Pct"] = (
-        (1 - result["STA"].rank(pct=True, method="average")) * 100
-    )
+        1 - result["STA"].rank(pct=True, method="average")
+    ) * 100
 
     result["SNOA_Pct"] = (
-        (1 - result["SNOA"].rank(pct=True, method="average")) * 100
-    )
+        1 - result["SNOA"].rank(pct=True, method="average")
+    ) * 100
 
     result["GP_Pct"] = (
         result["Gross_Profitability"]
@@ -281,7 +281,6 @@ def add_quality_scores(df):
         "GP_Pct",
     ]
 
-    # Require all four metrics for a comparable composite score.
     complete = result[METRICS].notna().all(axis=1)
 
     result["Quality_Score"] = np.nan
@@ -299,8 +298,8 @@ eligible = add_quality_scores(eligible)
 # 6. FIXED PERCENTILE CUTOFFS
 # ============================================================
 
-# Cutoffs are calculated from the initial eligible universe, not
-# recalculated after each stage. This keeps each threshold consistent.
+# Calculate cutoffs from the eligible universe once, rather than
+# recalculating them as companies are removed from the funnel.
 
 sta_cutoff = eligible["STA"].dropna().quantile(
     keep_lowest_sta / 100
@@ -328,8 +327,8 @@ def apply_stage(stage_name, metric_name, rule_description, condition):
     global current
 
     before = len(current)
-
     values = current[metric_name]
+
     missing_mask = values.isna()
     passes = values.notna() & condition(values)
 
@@ -364,30 +363,21 @@ apply_stage(
 apply_stage(
     "Earnings Quality — STA",
     "STA",
-    (
-        f"STA ≤ {sta_cutoff:.4f}; lowest "
-        f"{keep_lowest_sta}% cutoff"
-    ),
+    f"STA ≤ {sta_cutoff:.4f}",
     lambda s: s <= sta_cutoff,
 )
 
 apply_stage(
     "Operating Asset Quality — SNOA",
     "SNOA",
-    (
-        f"SNOA ≤ {snoa_cutoff:.4f}; lowest "
-        f"{keep_lowest_snoa}% cutoff"
-    ),
+    f"SNOA ≤ {snoa_cutoff:.4f}",
     lambda s: s <= snoa_cutoff,
 )
 
 apply_stage(
     "Gross Profitability",
     "Gross_Profitability",
-    (
-        f"Gross Profitability ≥ {gp_cutoff:.4f}; highest "
-        f"{keep_highest_gp}% cutoff"
-    ),
+    f"Gross Profitability ≥ {gp_cutoff:.4f}",
     lambda s: s >= gp_cutoff,
 )
 
@@ -403,8 +393,7 @@ st.header("Live Screening Funnel")
 st.markdown(
     """
     Each stage filters the companies that survived the previous stage.
-    The funnel shows the number removed and the number remaining at
-    each step.
+    The funnel shows how many companies were removed and how many remain.
     """
 )
 
@@ -459,7 +448,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 
 # ============================================================
-# 9. STAGE EXPLANATIONS
+# 9. EXPLAIN EACH SCREENING STAGE
 # ============================================================
 
 st.header("What Each Screening Stage Means")
@@ -467,8 +456,8 @@ st.header("What Each Screening Stage Means")
 with st.expander("Stage 1 — Financial Health: Altman Z-Score", expanded=True):
     st.markdown(
         """
-        **Purpose:** remove companies with a Z-Score below the selected
-        financial-distress boundary before assessing other characteristics.
+        **Purpose:** remove companies below the selected financial-distress
+        boundary before assessing other characteristics.
 
         The manufacturing Altman Z-Score combines working capital,
         retained earnings, EBIT, market equity relative to liabilities,
@@ -476,11 +465,11 @@ with st.expander("Stage 1 — Financial Health: Altman Z-Score", expanded=True):
 
         A score below 1.81 is commonly associated with the distress zone
         in the original manufacturing model. A score above 2.99 is
-        commonly associated with the safe zone. These are model
-        classifications, not guarantees of solvency.
+        commonly associated with the safe zone. These classifications
+        are not guarantees of solvency.
 
-        This screen uses 1.81 as its default minimum. Companies passing
-        this stage are not necessarily in the safe zone.
+        This screen uses 1.81 as its default minimum. Passing this stage
+        does not necessarily mean a company is in the safe zone.
         """
     )
 
@@ -496,7 +485,7 @@ with st.expander("Stage 2 — Earnings Quality: STA"):
         supported by cash flow. Negative values can occur when operating
         cash flow exceeds net income.
 
-        The cutoff is a percentile of the market-cap-eligible universe.
+        The cutoff is based on a percentile of the eligible universe.
         Missing STA values cannot pass this stage.
         """
     )
@@ -509,8 +498,7 @@ with st.expander("Stage 3 — Operating Asset Quality: SNOA"):
 
         Lower SNOA is preferred under this screening rule, but the
         relationship can vary by business model and accounting
-        characteristics. The measure should not be interpreted in
-        isolation.
+        characteristics. It should not be interpreted in isolation.
 
         The cutoff is calculated from the initial eligible universe.
         """
@@ -541,20 +529,17 @@ st.header("Top 10 BUY and SELL Candidates")
 
 st.markdown(
     """
-    The final rankings are separate from the funnel counts:
-
-    - **Top 10 BUY:** the highest composite-score companies that passed
+    - **Top 10 BUY:** highest composite scores among companies that passed
       every funnel stage.
-    - **Top 10 SELL:** the lowest composite-score companies in the
-      initial market-cap-eligible universe with all four metrics
-      available. This list is not restricted to funnel survivors.
+    - **Top 10 SELL:** lowest composite scores among all companies in the
+      eligible universe with all four metrics available.
 
-    A BUY or SELL label here means a screening candidate for further
-    research, not a prediction of future returns.
+    The SELL list is a relative low-quality ranking, not a short-sale
+    recommendation. A low score does not establish that a stock is
+    overvalued or will deliver negative returns.
     """
 )
 
-# Top 10 BUY comes only from companies that passed every stage.
 buy_pool = final_candidates[
     final_candidates["Quality_Score"].notna()
 ].copy()
@@ -564,8 +549,6 @@ top10_buy = buy_pool.sort_values(
     ascending=False,
 ).head(10).copy()
 
-# Top 10 SELL comes from the full eligible universe.
-# Require all four metrics for comparable composite scores.
 sell_pool = eligible[
     eligible["Quality_Score"].notna()
 ].copy()
@@ -577,35 +560,41 @@ top10_sell = sell_pool.sort_values(
 
 
 def prepare_rank_table(df):
-    result = df.copy()
+    """
+    Build a fresh display DataFrame from explicitly selected columns.
+    This avoids duplicate column names in Streamlit/PyArrow.
+    """
+    columns = {
+        "Display_Ticker": "Ticker",
+        "Name": "Name",
+        "Market Cap": "Market Cap",
+        "Price": "Price",
+        "Quality_Score": "Composite Quality Score",
+        "Altman_Z": "Altman Z-Score",
+        "STA": "STA (%)",
+        "SNOA": "SNOA (%)",
+        "Gross_Profitability": "Gross Profitability (%)",
+    }
 
-    result["STA (%)"] = result["STA"] * 100
-    result["SNOA (%)"] = result["SNOA"] * 100
-    result["Gross Profitability (%)"] = (
-        result["Gross_Profitability"] * 100
-    )
+    available_columns = [
+        original for original in columns if original in df.columns
+    ]
 
-    result = result.rename(
-        columns={
-            "Display_Ticker": "Ticker",
-            "Altman_Z": "Altman Z-Score",
-            "Quality_Score": "Composite Quality Score",
-        }
-    )
+    output = df[available_columns].copy()
+    output = output.rename(columns=columns)
 
-    columns = [
-        "Ticker",
-        "Name",
-        "Market Cap",
-        "Price",
-        "Composite Quality Score",
-        "Altman Z-Score",
+    for col in [
         "STA (%)",
         "SNOA (%)",
         "Gross Profitability (%)",
-    ]
+    ]:
+        if col in output.columns:
+            output[col] = output[col] * 100
 
-    return result[[col for col in columns if col in result.columns]]
+    # Final safety check against duplicate display labels.
+    output = output.loc[:, ~output.columns.duplicated()]
+
+    return output
 
 
 buy_table = prepare_rank_table(top10_buy)
@@ -616,14 +605,13 @@ buy_col, sell_col = st.columns(2)
 with buy_col:
     st.subheader("Top 10 BUY")
     st.caption(
-        "Highest composite scores among companies that passed every "
-        "funnel stage."
+        "Highest composite quality scores among funnel survivors."
     )
 
     if buy_table.empty:
         st.info(
-            "No companies passed every stage with all four metrics "
-            "available. Review the funnel settings and data coverage."
+            "No companies passed every funnel stage with all four metrics "
+            "available. Review the cutoffs and coverage."
         )
     else:
         st.dataframe(
@@ -643,8 +631,7 @@ with buy_col:
 with sell_col:
     st.subheader("Top 10 SELL")
     st.caption(
-        "Lowest composite scores among eligible companies with all "
-        "four metrics available."
+        "Lowest composite quality scores among eligible companies."
     )
 
     if sell_table.empty:
@@ -669,14 +656,14 @@ with sell_col:
 
 
 # ============================================================
-# 11. EXAMINE THE FINAL FUNNEL CANDIDATES
+# 11. FINAL FUNNEL CANDIDATES
 # ============================================================
 
 st.header("Final Funnel Candidates")
 
 st.caption(
-    "These companies passed every sequential screening stage. "
-    "They are candidates for further research, not automatic buy recommendations."
+    "These companies passed every sequential stage. They are candidates "
+    "for further research, not automatic buy recommendations."
 )
 
 if final_candidates.empty:
@@ -689,6 +676,7 @@ else:
         final_candidates.sort_values(
             "Quality_Score",
             ascending=False,
+            na_position="last",
         )
     )
 
@@ -751,7 +739,7 @@ st.download_button(
 
 
 # ============================================================
-# 13. METHODOLOGY AND COVERAGE
+# 13. METHODOLOGY AND DATA COVERAGE
 # ============================================================
 
 st.header("Methodology and Data Coverage")
@@ -761,47 +749,42 @@ with st.expander("How the sequential screen works", expanded=True):
         """
         **Step 1 — Define the eligible universe**
 
-        Companies must have a market capitalization that meets the
-        minimum selected in the sidebar.
+        Companies must meet the minimum market capitalization.
 
-        **Step 2 — Screen financial health**
+        **Step 2 — Financial health**
 
-        Companies with Altman Z below the selected minimum are excluded.
-        This is a preliminary distress screen.
+        Exclude companies with Altman Z below the selected minimum.
 
-        **Step 3 — Screen earnings quality**
+        **Step 3 — Earnings quality**
 
-        Retain companies at or below the chosen STA percentile cutoff.
+        Retain companies at or below the selected STA percentile cutoff.
 
-        **Step 4 — Screen operating asset quality**
+        **Step 4 — Operating asset quality**
 
-        Retain companies at or below the chosen SNOA percentile cutoff.
+        Retain companies at or below the selected SNOA percentile cutoff.
 
-        **Step 5 — Screen gross profitability**
+        **Step 5 — Gross profitability**
 
-        Retain companies at or above the chosen gross profitability
+        Retain companies at or above the selected gross profitability
         percentile cutoff.
 
-        **Step 6 — Rank the results**
+        **Step 6 — Rank candidates**
 
         The BUY list ranks funnel survivors by composite score. The SELL
-        list ranks the lowest-scoring companies in the initial eligible
-        universe. Both require all four metrics to be present.
+        list ranks the lowest scores in the eligible universe. Both lists
+        require all four metrics to be present.
 
-        **Percentile methodology**
-
-        The STA, SNOA, and gross profitability thresholds are calculated
-        from the initial eligible universe after the market-cap filter.
-        They do not change as the funnel gets smaller.
+        Percentile cutoffs are calculated from the initial eligible
+        universe and remain fixed throughout the funnel.
         """
     )
 
 with st.expander("How the composite quality score works"):
     st.markdown(
         """
-        Each metric is converted into a percentile score from 0 to 100.
-        The direction is standardized so a higher percentile score always
-        represents a more favourable result under the selected methodology.
+        Each metric is converted to a percentile from 0 to 100. The
+        direction is standardized so a higher score means a more
+        favourable relative result under this methodology.
 
         | Metric | Preferred direction |
         |---|---|
@@ -810,17 +793,16 @@ with st.expander("How the composite quality score works"):
         | SNOA | Lower |
         | Gross Profitability | Higher |
 
-        The composite quality score is the arithmetic mean of the four
-        percentile scores, with equal weight assigned to each metric.
+        The composite quality score is the arithmetic mean of these
+        four percentiles, with equal weight for each metric.
 
-        A score near 100 means the company ranks favourably across these
-        measures relative to the eligible universe. It does not mean the
-        stock has a 100% chance of success, and it does not measure
-        expected investment returns.
+        Companies missing any of the four metrics are excluded from
+        composite rankings. This avoids comparing scores calculated
+        from different numbers of factors.
 
-        Companies missing any of the four metrics are excluded from the
-        composite rankings to avoid comparing scores based on different
-        numbers of factors.
+        A high score means the company ranks favourably on these measures
+        relative to the eligible universe. It does not mean a high
+        probability of investment success or that the stock is undervalued.
         """
     )
 
@@ -856,19 +838,18 @@ with st.expander("Coverage and missing values"):
 with st.expander("Important limitations"):
     st.markdown(
         """
-        - This screen does not estimate intrinsic value or directly test
+        - The screen does not estimate intrinsic value or directly test
           whether a stock is undervalued.
-        - The Altman Z-Score is a model, not a guarantee of solvency.
+        - Altman Z is a model, not a guarantee of solvency.
         - Lower STA and SNOA and higher gross profitability are screening
-          preferences, not universal rules that fit every manufacturer.
+          preferences, not universal rules for every manufacturer.
         - Percentile thresholds are configurable choices, not proven
           optimal parameters.
         - The order of the funnel affects which companies survive.
         - Missing or stale financial data can materially affect results.
         - The SELL list is a relative low-quality ranking, not a short-sale
-          recommendation. A low score alone does not imply negative future
-          returns.
-        - All results depend on the values contained in universe.csv.
+          recommendation.
+        - Results depend on the data in universe.csv.
         """
     )
 
