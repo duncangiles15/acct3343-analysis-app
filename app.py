@@ -1337,7 +1337,7 @@ st.header("9. Methodology and Data Coverage")
 with st.expander("How the Screening Rules Work"):
     st.markdown(
         """
-        **STA — Sloan's T Accruals**
+        **STA — Earnings Quality**
 
         Formula: (Net Income − Operating Cash Flow) / Total Assets.
 
