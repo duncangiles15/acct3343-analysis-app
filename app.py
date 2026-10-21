@@ -1,595 +1,957 @@
 
-import streamlit as st
-import pandas as pd
+import math
+import re
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
+import streamlit as st
+
+
+# --------------------------------------------------
+# Page setup
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="Manufacturing Stock Screener",
-    page_icon="📊",
-    layout="wide"
+    page_title="Stock Screening Analysis",
+    page_icon="📈",
+    layout="wide",
 )
 
-# ==================================================
-# 1. LOAD DATA
-# ==================================================
+st.title("Stock Screening Analysis")
+st.caption(
+    "An interactive screening tool using gross profitability, "
+    "sales-to-assets, and Altman Z-score."
+)
+
+
+# --------------------------------------------------
+# Data loading and preparation
+# --------------------------------------------------
 
 @st.cache_data
 def load_data():
     df = pd.read_csv("universe.csv")
 
-    df["Ticker"] = (
-        df["Ticker"].astype("string").str.strip().str.upper()
-    )
+    # Use the main ticker column, with a fallback if necessary.
+    if "Ticker" not in df.columns:
+        if "Ticker_guess" in df.columns:
+            df["Ticker"] = df["Ticker_guess"]
+        else:
+            df["Ticker"] = ""
 
-    numeric_cols = [
-        "Gross_Profitability", "STA", "SNOA", "Altman_Z",
-        "Gross_Profit", "Total_Assets"
+    df["Ticker"] = df["Ticker"].fillna("").astype(str).str.strip()
+
+    # Convert relevant numeric columns without replacing missing values.
+    numeric_columns = [
+        "Market Cap",
+        "Price",
+        "Today",
+        "Price (30 days)",
+        "Altman_Z",
+        "STA",
+        "SNOA",
+        "Gross_Profitability",
+        "Gross_Profit",
+        "Total_Assets",
     ]
 
-    for col in numeric_cols:
+    for col in numeric_columns:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    def market_cap_number(value):
-        if pd.isna(value):
-            return np.nan
-        s = str(value).strip().upper().replace("$", "").replace(",", "")
-        try:
-            for suffix, multiplier in [
-                ("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)
-            ]:
-                if s.endswith(suffix):
-                    return float(s[:-1]) * multiplier
-            return float(s)
-        except ValueError:
-            return np.nan
+    # Parse market-cap strings such as 1.2B or 850M if necessary.
+    if "Market Cap" in df.columns:
+        def parse_market_cap(value):
+            if pd.isna(value):
+                return np.nan
+            if isinstance(value, (int, float, np.number)):
+                return float(value)
 
-    df["Market_Cap_USD"] = df["Market Cap"].apply(market_cap_number)
+            text = str(value).strip().replace(",", "").replace("$", "")
+            multiplier = 1
+
+            if text.endswith(("T", "t")):
+                multiplier = 1e12
+                text = text[:-1]
+            elif text.endswith(("B", "b")):
+                multiplier = 1e9
+                text = text[:-1]
+            elif text.endswith(("M", "m")):
+                multiplier = 1e6
+                text = text[:-1]
+            elif text.endswith(("K", "k")):
+                multiplier = 1e3
+                text = text[:-1]
+
+            try:
+                return float(text) * multiplier
+            except ValueError:
+                return np.nan
+
+        df["Market Cap"] = df["Market Cap"].apply(parse_market_cap)
+
+    # Ensure expected columns exist while preserving missing values.
+    for col in [
+        "Name",
+        "Altman_Status",
+        "STA_Status",
+        "SNOA_Status",
+        "GP_Status",
+    ]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["Name"] = df["Name"].fillna("Unknown company").astype(str)
+
     return df
 
 
 try:
-    df = load_data()
-except Exception as e:
-    st.error(f"Could not load universe.csv: {e}")
+    original_df = load_data()
+except Exception as exc:
+    st.error(
+        "The data file could not be loaded. Make sure universe.csv "
+        "is in the same GitHub repository as app.py."
+    )
+    st.exception(exc)
     st.stop()
 
-st.title("Manufacturing Stock Screening App")
-st.write(
-    "Adjust the filters and screening rules to identify potential long "
-    "and short candidates. Every classification is linked to explicit rules."
+
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
+
+def percentile_flags(series, tickers, percentile, higher_is_better=True):
+    """
+    Flag the top or bottom percentile of valid observations.
+
+    Missing observations are excluded from the eligible count.
+    The cutoff uses floor(eligible firms × percentile).
+    Ticker is used as a deterministic secondary sort key.
+    """
+    values = pd.to_numeric(series, errors="coerce")
+    valid = values.notna()
+
+    result = pd.Series(False, index=series.index)
+
+    eligible = pd.DataFrame({
+        "value": values[valid],
+        "ticker": tickers[valid].astype(str),
+    })
+
+    n_eligible = len(eligible)
+    n_selected = math.floor(n_eligible * percentile)
+
+    if n_selected <= 0 or n_eligible == 0:
+        return result
+
+    # For the best group, higher values sort first if higher is better.
+    best = eligible.sort_values(
+        ["value", "ticker"],
+        ascending=[not higher_is_better, True],
+        kind="mergesort",
+    ).head(n_selected)
+
+    # For the worst group, the direction is reversed.
+    worst = eligible.sort_values(
+        ["value", "ticker"],
+        ascending=[higher_is_better, True],
+        kind="mergesort",
+    ).head(n_selected)
+
+    result.loc[best.index] = True
+    worst_flag = pd.Series(False, index=series.index)
+    worst_flag.loc[worst.index] = True
+
+    return result, worst_flag
+
+
+def format_number(value, decimals=2):
+    if pd.isna(value):
+        return "N/A"
+    return f"{value:,.{decimals}f}"
+
+
+def display_columns(df):
+    desired = [
+        "Rank",
+        "Ticker",
+        "Name",
+        "Market Cap",
+        "Price",
+        "Gross_Profitability",
+        "STA",
+        "SNOA",
+        "Altman_Z",
+        "Buy_Signals",
+        "Sell_Signals",
+        "Decision",
+    ]
+    return [col for col in desired if col in df.columns]
+
+
+def style_table(df):
+    """
+    Format a copy for display. The underlying numeric values are unchanged.
+    """
+    out = df.copy()
+
+    if "Market Cap" in out.columns:
+        out["Market Cap"] = out["Market Cap"].apply(
+            lambda x: f"${x / 1e9:,.2f}B" if pd.notna(x) else "N/A"
+        )
+
+    if "Price" in out.columns:
+        out["Price"] = out["Price"].apply(
+            lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A"
+        )
+
+    for col in ["Gross_Profitability", "STA", "SNOA", "Altman_Z"]:
+        if col in out.columns:
+            out[col] = out[col].apply(
+                lambda x: format_number(x, 3)
+            )
+
+    return out
+
+
+# --------------------------------------------------
+# Sidebar: interactive screening controls
+# --------------------------------------------------
+
+st.sidebar.header("Screening Controls")
+st.sidebar.caption(
+    "Change the thresholds to update the results, candidate lists, "
+    "and charts."
 )
 
-st.info(
-    "Current data includes GPA, STA, the existing SNOA calculation, and Altman Z. "
-    "Book-to-market and the required scaled-NOA formula are not yet available, "
-    "so they are disclosed as outstanding metrics rather than fabricated."
-)
-
-# ==================================================
-# 2. USER CONTROLS
-# ==================================================
-
-st.sidebar.header("1. Universe filters")
-
-countries = sorted(df["Country"].dropna().astype(str).unique())
-
-selected_countries = st.sidebar.multiselect(
-    "Countries",
-    options=countries,
-    default=countries
-)
-
-min_market_cap = st.sidebar.number_input(
+min_market_cap_millions = st.sidebar.number_input(
     "Minimum market cap (USD millions)",
     min_value=0,
+    max_value=10000000,
     value=0,
-    step=100
+    step=100,
 )
 
-st.sidebar.header("2. Percentile screening rules")
+gpa_top_pct = st.sidebar.slider(
+    "Gross profitability: top percentile for BUY signal",
+    min_value=5,
+    max_value=30,
+    value=10,
+    step=5,
+) / 100
 
-gpa_cutoff_pct = st.sidebar.slider(
-    "GPA top/bottom percentile (%)",
-    min_value=5, max_value=30, value=10, step=5,
-    help="Top GPA percentile is favourable; bottom percentile is unfavourable."
+gpa_bottom_pct = st.sidebar.slider(
+    "Gross profitability: bottom percentile for SELL signal",
+    min_value=5,
+    max_value=30,
+    value=10,
+    step=5,
+) / 100
+
+sta_bottom_pct = st.sidebar.slider(
+    "STA: bottom percentile for BUY signal",
+    min_value=5,
+    max_value=30,
+    value=10,
+    step=5,
+) / 100
+
+sta_top_pct = st.sidebar.slider(
+    "STA: top percentile for SELL signal",
+    min_value=5,
+    max_value=30,
+    value=10,
+    step=5,
+) / 100
+
+z_distress = st.sidebar.number_input(
+    "Altman Z distress threshold",
+    min_value=-10.0,
+    max_value=10.0,
+    value=1.81,
+    step=0.01,
+    format="%.2f",
 )
 
-sta_cutoff_pct = st.sidebar.slider(
-    "STA top/bottom percentile (%)",
-    min_value=5, max_value=30, value=10, step=5,
-    help="Low STA is favourable; high STA is unfavourable."
+z_safe = st.sidebar.number_input(
+    "Altman Z safe-zone threshold",
+    min_value=-10.0,
+    max_value=10.0,
+    value=2.99,
+    step=0.01,
+    format="%.2f",
 )
 
-st.sidebar.header("3. Altman Z criteria")
-
-z_distress = st.sidebar.slider(
-    "Distress threshold: Z below",
-    min_value=0.0, max_value=3.0, value=1.81, step=0.01
+min_buy_signals = st.sidebar.slider(
+    "Minimum BUY signals for Potential LONG",
+    min_value=1,
+    max_value=2,
+    value=2,
+    step=1,
 )
 
-z_safe = st.sidebar.slider(
-    "Safe-zone threshold: Z above",
-    min_value=1.81, max_value=5.0, value=2.99, step=0.01
+min_sell_signals = st.sidebar.slider(
+    "Minimum SELL signals for Potential SHORT",
+    min_value=1,
+    max_value=3,
+    value=2,
+    step=1,
 )
 
 if z_safe <= z_distress:
-    st.sidebar.error("Safe-zone threshold must be above distress threshold.")
+    st.sidebar.error(
+        "The safe-zone threshold should be greater than the distress threshold."
+    )
+    st.stop()
 
-st.sidebar.header("4. Recommendation rules")
+if gpa_top_pct + gpa_bottom_pct > 1:
+    st.sidebar.error(
+        "The gross profitability top and bottom percentiles overlap too much."
+    )
+    st.stop()
 
-buy_signals_required = st.sidebar.slider(
-    "Minimum BUY signals for a long candidate",
-    min_value=1, max_value=2, value=2
-)
+if sta_top_pct + sta_bottom_pct > 1:
+    st.sidebar.error(
+        "The STA top and bottom percentiles overlap too much."
+    )
+    st.stop()
 
-sell_signals_required = st.sidebar.slider(
-    "Minimum SELL signals for a short candidate",
-    min_value=1, max_value=3, value=2
-)
 
-# ==================================================
-# 3. APPLY UNIVERSE FILTERS
-# ==================================================
+# --------------------------------------------------
+# Apply basic universe filters
+# --------------------------------------------------
 
-screen = df[
-    df["Country"].astype(str).isin(selected_countries)
-    & (df["Market_Cap_USD"] >= min_market_cap * 1_000_000)
-].copy()
+df = original_df.copy()
 
-# ==================================================
-# 4. PERCENTILE SCREEN FUNCTION
-# ==================================================
-
-def percentile_flags(data, column, higher_is_better, cutoff_pct):
-    """
-    Rank only non-missing observations.
-    Select floor(eligible firms * percentile) at each end.
-    Ranks use method='min'. Ticker provides deterministic
-    ordering when a cutoff splits tied values.
-    """
-    buy_flag = pd.Series(False, index=data.index)
-    sell_flag = pd.Series(False, index=data.index)
-
-    eligible = data.loc[
-        data[column].notna(), ["Ticker", column]
+if "Market Cap" in df.columns:
+    df = df[
+        df["Market Cap"].isna()
+        | (df["Market Cap"] >= min_market_cap_millions * 1e6)
     ].copy()
 
-    n = len(eligible)
-    k = int(np.floor(n * cutoff_pct / 100))
+df = df.reset_index(drop=True)
 
-    if n == 0 or k == 0:
-        return buy_flag, sell_flag, n, k
-
-    # Keep the rank calculation explicit for methodology transparency.
-    eligible["Rank"] = eligible[column].rank(
-        method="min",
-        ascending=not higher_is_better
-    )
-
-    best = eligible.sort_values(
-        [column, "Ticker"],
-        ascending=[not higher_is_better, True],
-        kind="mergesort"
-    )
-
-    worst = eligible.sort_values(
-        [column, "Ticker"],
-        ascending=[higher_is_better, True],
-        kind="mergesort"
-    )
-
-    best_tickers = set(best.head(k)["Ticker"])
-    worst_tickers = set(worst.head(k)["Ticker"])
-
-    # In very small universes, prevent the same ticker getting both flags.
-    overlap = best_tickers.intersection(worst_tickers)
-    best_tickers -= overlap
-    worst_tickers -= overlap
-
-    buy_flag.loc[data["Ticker"].isin(best_tickers)] = True
-    sell_flag.loc[data["Ticker"].isin(worst_tickers)] = True
-
-    return buy_flag, sell_flag, n, k
+if df.empty:
+    st.warning("No companies remain after applying the current filters.")
+    st.stop()
 
 
-# ==================================================
-# 5. CALCULATE SCREEN FLAGS
-# ==================================================
+# --------------------------------------------------
+# Screening signals
+# --------------------------------------------------
 
-screen["GPA_BUY"], screen["GPA_SELL"], gpa_n, gpa_k = percentile_flags(
-    screen, "Gross_Profitability", True, gpa_cutoff_pct
+# Gross profitability:
+# Higher values are considered stronger.
+gpa_buy, gpa_sell = percentile_flags(
+    df["Gross_Profitability"],
+    df["Ticker"],
+    gpa_top_pct,
+    higher_is_better=True,
 )
 
-screen["STA_BUY"], screen["STA_SELL"], sta_n, sta_k = percentile_flags(
-    screen, "STA", False, sta_cutoff_pct
+# STA:
+# Lower values are considered stronger for this screen.
+sta_buy, sta_sell = percentile_flags(
+    df["STA"],
+    df["Ticker"],
+    sta_bottom_pct,
+    higher_is_better=False,
 )
 
-# Altman Z classification
-screen["Altman_Zone"] = np.select(
-    [
-        screen["Altman_Z"].notna()
-        & (screen["Altman_Z"] < z_distress),
+df["GPA_BUY"] = gpa_buy
+df["GPA_SELL"] = gpa_sell
+df["STA_BUY"] = sta_buy
+df["STA_SELL"] = sta_sell
 
-        screen["Altman_Z"].notna()
-        & (screen["Altman_Z"] >= z_distress)
-        & (screen["Altman_Z"] <= z_safe),
-
-        screen["Altman_Z"].notna()
-        & (screen["Altman_Z"] > z_safe)
-    ],
-    ["Distress", "Grey zone", "Safe"],
-    default="Missing"
+# Altman Z distress signal.
+df["ALTMAN_SELL"] = (
+    df["Altman_Z"].notna()
+    & (df["Altman_Z"] < z_distress)
 )
 
-screen["Altman_SELL"] = screen["Altman_Zone"].eq("Distress")
-
-# GPA and STA are percentile signals.
-# Altman Z distress is an additional SELL signal.
-# Altman safe-zone status is shown separately, not treated as a
-# guaranteed BUY signal.
-screen["BUY_Signals"] = (
-    screen["GPA_BUY"].astype(int)
-    + screen["STA_BUY"].astype(int)
+# A safe-zone result is displayed as context but is not an automatic BUY.
+df["ALTMAN_SAFE"] = (
+    df["Altman_Z"].notna()
+    & (df["Altman_Z"] > z_safe)
 )
 
-screen["SELL_Signals"] = (
-    screen["GPA_SELL"].astype(int)
-    + screen["STA_SELL"].astype(int)
-    + screen["Altman_SELL"].astype(int)
+df["Buy_Signals"] = (
+    df["GPA_BUY"].astype(int)
+    + df["STA_BUY"].astype(int)
 )
 
-screen["Core_Metrics_Available"] = screen[
-    ["Gross_Profitability", "STA", "Altman_Z"]
-].notna().sum(axis=1)
+df["Sell_Signals"] = (
+    df["GPA_SELL"].astype(int)
+    + df["STA_SELL"].astype(int)
+    + df["ALTMAN_SELL"].astype(int)
+)
 
-# A missing metric cannot create a flag.
-# REVIEW is used when fewer than two core measures are available.
-enough_data = screen["Core_Metrics_Available"] >= 2
+required_metric_count = (
+    df["Gross_Profitability"].notna().astype(int)
+    + df["STA"].notna().astype(int)
+    + df["Altman_Z"].notna().astype(int)
+)
 
-long_rule = (
+df["Available_Core_Metrics"] = required_metric_count
+
+enough_data = required_metric_count >= 2
+
+potential_long = (
     enough_data
-    & (screen["BUY_Signals"] >= buy_signals_required)
-    & (screen["SELL_Signals"] < sell_signals_required)
+    & (df["Buy_Signals"] >= min_buy_signals)
+    & (df["Sell_Signals"] < min_sell_signals)
 )
 
-short_rule = (
+potential_short = (
     enough_data
-    & (screen["SELL_Signals"] >= sell_signals_required)
-    & (screen["BUY_Signals"] < buy_signals_required)
+    & (df["Sell_Signals"] >= min_sell_signals)
+    & (df["Buy_Signals"] < min_buy_signals)
 )
 
-screen["Decision"] = np.select(
-    [
-        ~enough_data,
-        long_rule,
-        short_rule,
-        (screen["BUY_Signals"] > 0) | (screen["SELL_Signals"] > 0)
+has_signals = (df["Buy_Signals"] > 0) | (df["Sell_Signals"] > 0)
+
+df["Decision"] = "NEUTRAL"
+df.loc[has_signals, "Decision"] = "MIXED"
+df.loc[~enough_data, "Decision"] = "REVIEW"
+df.loc[potential_long, "Decision"] = "POTENTIAL LONG"
+df.loc[potential_short, "Decision"] = "POTENTIAL SHORT"
+
+
+# --------------------------------------------------
+# Rank candidates for the Top 10 lists
+# --------------------------------------------------
+
+# Longs: more BUY signals, fewer SELL signals, higher GPA,
+# lower STA, and higher Altman Z are preferred as tie-breakers.
+long_candidates = df[df["Decision"] == "POTENTIAL LONG"].copy()
+
+long_candidates = long_candidates.sort_values(
+    by=[
+        "Buy_Signals",
+        "Sell_Signals",
+        "Gross_Profitability",
+        "STA",
+        "Altman_Z",
+        "Ticker",
     ],
-    ["REVIEW", "Potential LONG", "Potential SHORT", "MIXED"],
-    default="NEUTRAL"
+    ascending=[False, True, False, True, False, True],
+    na_position="last",
 )
 
-# ==================================================
-# 6. SUMMARY
-# ==================================================
+long_candidates["Candidate Rank"] = range(1, len(long_candidates) + 1)
 
-st.header("Screening results")
+# Shorts: more SELL signals, fewer BUY signals, lower GPA,
+# higher STA, and lower Altman Z are preferred as tie-breakers.
+short_candidates = df[df["Decision"] == "POTENTIAL SHORT"].copy()
 
-m1, m2, m3, m4, m5 = st.columns(5)
+short_candidates = short_candidates.sort_values(
+    by=[
+        "Sell_Signals",
+        "Buy_Signals",
+        "Gross_Profitability",
+        "STA",
+        "Altman_Z",
+        "Ticker",
+    ],
+    ascending=[False, True, True, False, True, True],
+    na_position="last",
+)
 
-m1.metric("Firms screened", len(screen))
-m2.metric("Potential LONG", int((screen["Decision"] == "Potential LONG").sum()))
-m3.metric("Potential SHORT", int((screen["Decision"] == "Potential SHORT").sum()))
-m4.metric("Mixed signals", int((screen["Decision"] == "MIXED").sum()))
-m5.metric("Needs review", int((screen["Decision"] == "REVIEW").sum()))
+short_candidates["Candidate Rank"] = range(1, len(short_candidates) + 1)
+
+top_10_buys = long_candidates.head(10).copy()
+top_10_sells = short_candidates.head(10).copy()
+
+
+# --------------------------------------------------
+# Summary metrics
+# --------------------------------------------------
+
+st.subheader("Screening Overview")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Companies screened", f"{len(df):,}")
+col2.metric("Potential LONG", f"{len(long_candidates):,}")
+col3.metric("Potential SHORT", f"{len(short_candidates):,}")
+col4.metric(
+    "Need review",
+    f"{(df['Decision'] == 'REVIEW').sum():,}",
+)
 
 st.caption(
-    f"GPA: {gpa_n} eligible, {gpa_k} selected at each end. "
-    f"STA: {sta_n} eligible, {sta_k} selected at each end."
+    "Potential LONG and Potential SHORT are screening results based on "
+    "the selected rules. They are candidates for further research, not "
+    "guaranteed investment recommendations."
 )
 
-# ==================================================
-# 7. SHOW THE RULES AND EACH FIRM'S SIGNALS
-# ==================================================
 
-st.header("How the screening rules work")
+# --------------------------------------------------
+# Simplified visual analysis
+# --------------------------------------------------
 
-with st.expander("GPA — Gross Profitability", expanded=True):
-    st.markdown(f"""
-    **Formula:** Gross profit / total assets.
+st.subheader("Visual Analysis")
 
-    - Potential BUY signal: top **{gpa_cutoff_pct}%** of firms with GPA available.
-    - Potential SELL signal: bottom **{gpa_cutoff_pct}%** of firms with GPA available.
-    - Missing GPA is excluded from this screen and cannot trigger a flag.
-    - Eligible firms: **{gpa_n}**. Cutoff count: **{gpa_k}** per end.
-    """)
+chart_col1, chart_col2 = st.columns(2)
 
-with st.expander("STA — Standardized Total Accruals", expanded=True):
-    st.markdown(f"""
-    **Formula:** (net income − operating cash flow) / total assets.
+with chart_col1:
+    decision_counts = (
+        df["Decision"]
+        .value_counts()
+        .reindex(
+            [
+                "POTENTIAL LONG",
+                "POTENTIAL SHORT",
+                "MIXED",
+                "NEUTRAL",
+                "REVIEW",
+            ],
+            fill_value=0,
+        )
+        .rename_axis("Screening outcome")
+        .reset_index(name="Companies")
+    )
 
-    - Potential BUY signal: bottom **{sta_cutoff_pct}%** of eligible firms.
-    - Potential SELL signal: top **{sta_cutoff_pct}%** of eligible firms.
-    - Higher STA may indicate lower earnings quality; negative STA means
-      earnings are more cash-backed under this measure.
-    - Missing STA is excluded from this screen and cannot trigger a flag.
-    - Eligible firms: **{sta_n}**. Cutoff count: **{sta_k}** per end.
-    """)
+    fig_decisions = px.bar(
+        decision_counts,
+        x="Screening outcome",
+        y="Companies",
+        title="Companies by screening outcome",
+        text="Companies",
+    )
 
-with st.expander("Altman Z — Financial-distress screen", expanded=True):
-    st.markdown(f"""
-    **Formula:** 1.2·WC/TA + 1.4·RE/TA + 3.3·EBIT/TA
-    + 0.6·MVE/TL + 1.0·Sales/TA.
+    fig_decisions.update_layout(
+        xaxis_title="",
+        yaxis_title="Number of companies",
+        showlegend=False,
+        margin=dict(l=10, r=10, t=55, b=10),
+    )
+    fig_decisions.update_traces(textposition="outside")
+    st.plotly_chart(fig_decisions, use_container_width=True)
 
-    - **Distress:** Z below {z_distress:.2f}; contributes one SELL signal.
-    - **Grey zone:** Z from {z_distress:.2f} through {z_safe:.2f}.
-    - **Safe:** Z above {z_safe:.2f}.
-    - The safe zone is not automatically a BUY recommendation.
-    - These are traditional manufacturing-model thresholds; they are
-      screening guidelines, not guarantees of default or safety.
-    """)
+with chart_col2:
+    plot_df = df.dropna(
+        subset=["Gross_Profitability", "STA"]
+    ).copy()
 
-with st.expander("Combined recommendation rules", expanded=True):
-    st.markdown(f"""
-    - **Potential LONG:** at least {buy_signals_required} BUY signals and
-      fewer than {sell_signals_required} SELL signals.
-    - **Potential SHORT:** at least {sell_signals_required} SELL signals and
-      fewer than {buy_signals_required} BUY signals.
-    - **MIXED:** at least one signal exists, but neither recommendation rule
-      is satisfied.
-    - **NEUTRAL:** no BUY or SELL flags.
-    - **REVIEW:** fewer than two of GPA, STA and Altman Z are available.
-    - All percentile cutoffs are recalculated on the filtered eligible firms.
-    """)
+    if not plot_df.empty:
+        fig_scatter = px.scatter(
+            plot_df,
+            x="Gross_Profitability",
+            y="STA",
+            color="Decision",
+            hover_name="Ticker",
+            hover_data={
+                "Name": True,
+                "Altman_Z": ":.2f",
+                "Buy_Signals": True,
+                "Sell_Signals": True,
+            },
+            title="Gross profitability vs. STA",
+            labels={
+                "Gross_Profitability": "Gross profitability",
+                "STA": "STA",
+                "Decision": "Screening outcome",
+            },
+        )
 
-st.warning(
-    "B/M and the required scaled-NOA formula are not yet present in the data. "
-    "The existing SNOA column uses an earlier operating-assets/operating-liabilities "
-    "formula, so it is displayed for reference but excluded from the current "
-    "recommendation score. Sector demeaning is also not implemented yet."
+        fig_scatter.update_layout(
+            margin=dict(l=10, r=10, t=55, b=10),
+            legend_title_text="Outcome",
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+    else:
+        st.info(
+            "There are not enough complete GPA and STA observations "
+            "to display this chart."
+        )
+
+st.caption(
+    "The first chart shows how the current rules classify the universe. "
+    "The second shows how gross profitability and STA compare for companies "
+    "with both values available. Hover over a point for company details."
 )
 
-# ==================================================
-# 8. BUY / SELL TABLES
-# ==================================================
 
-table_columns = [
-    "Ticker", "Name", "Country", "Market Cap",
-    "Gross_Profitability", "GPA_BUY", "GPA_SELL",
-    "STA", "STA_BUY", "STA_SELL",
-    "Altman_Z", "Altman_Zone", "Altman_SELL",
-    "SNOA", "BUY_Signals", "SELL_Signals",
-    "Core_Metrics_Available", "Decision"
-]
+# --------------------------------------------------
+# Top 10 candidate lists
+# --------------------------------------------------
 
-table_columns = [c for c in table_columns if c in screen.columns]
+st.subheader("Top 10 BUY Candidates")
+st.write(
+    "Potential LONG companies ranked using the existing BUY/SELL signal "
+    "rules and the displayed tie-breakers."
+)
 
-st.header("Candidate companies")
+if top_10_buys.empty:
+    st.info(
+        "No Potential LONG candidates meet the current screening rules. "
+        "Try adjusting the sidebar thresholds."
+    )
+else:
+    buy_display = top_10_buys.copy()
+    buy_display.insert(0, "Rank", buy_display["Candidate Rank"])
+    cols = ["Rank"] + display_columns(buy_display)
+    cols = list(dict.fromkeys(cols))
+    st.dataframe(
+        style_table(buy_display[cols]),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.download_button(
+        "Download Top 10 BUY candidates",
+        data=top_10_buys.to_csv(index=False).encode("utf-8"),
+        file_name="top_10_buy_candidates.csv",
+        mime="text/csv",
+    )
+
+st.subheader("Top 10 SELL Candidates")
+st.write(
+    "Potential SHORT companies ranked using the existing SELL/BUY signal "
+    "rules and the displayed tie-breakers."
+)
+
+if top_10_sells.empty:
+    st.info(
+        "No Potential SHORT candidates meet the current screening rules. "
+        "Try adjusting the sidebar thresholds."
+    )
+else:
+    sell_display = top_10_sells.copy()
+    sell_display.insert(0, "Rank", sell_display["Candidate Rank"])
+    cols = ["Rank"] + display_columns(sell_display)
+    cols = list(dict.fromkeys(cols))
+    st.dataframe(
+        style_table(sell_display[cols]),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.download_button(
+        "Download Top 10 SELL candidates",
+        data=top_10_sells.to_csv(index=False).encode("utf-8"),
+        file_name="top_10_sell_candidates.csv",
+        mime="text/csv",
+    )
+
+
+# --------------------------------------------------
+# Detailed screening results
+# --------------------------------------------------
+
+st.subheader("Detailed Results")
 
 tab_long, tab_short, tab_mixed, tab_all = st.tabs(
-    ["Potential LONG", "Potential SHORT", "Mixed / Review", "All firms"]
+    ["Potential LONG", "Potential SHORT", "Mixed / Review", "All Companies"]
 )
 
 with tab_long:
-    long_df = screen[screen["Decision"] == "Potential LONG"]
-    st.dataframe(
-        long_df[table_columns],
-        use_container_width=True,
-        hide_index=True
+    st.write(
+        "Companies meeting the minimum BUY-signal requirement without "
+        "meeting the minimum SELL-signal requirement."
     )
-    st.download_button(
-        "Download long candidates CSV",
-        long_df.to_csv(index=False),
-        "potential_long_candidates.csv",
-        "text/csv"
-    )
+    if long_candidates.empty:
+        st.info("No companies currently meet the Potential LONG rules.")
+    else:
+        st.dataframe(
+            style_table(long_candidates[display_columns(long_candidates)]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_short:
-    short_df = screen[screen["Decision"] == "Potential SHORT"]
-    st.dataframe(
-        short_df[table_columns],
-        use_container_width=True,
-        hide_index=True
+    st.write(
+        "Companies meeting the minimum SELL-signal requirement without "
+        "meeting the minimum BUY-signal requirement."
     )
-    st.download_button(
-        "Download short candidates CSV",
-        short_df.to_csv(index=False),
-        "potential_short_candidates.csv",
-        "text/csv"
-    )
+    if short_candidates.empty:
+        st.info("No companies currently meet the Potential SHORT rules.")
+    else:
+        st.dataframe(
+            style_table(short_candidates[display_columns(short_candidates)]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_mixed:
-    mixed_df = screen[
-        screen["Decision"].isin(["MIXED", "REVIEW", "NEUTRAL"])
-    ]
-    st.dataframe(
-        mixed_df[table_columns],
-        use_container_width=True,
-        hide_index=True
+    mixed_review = df[
+        df["Decision"].isin(["MIXED", "REVIEW"])
+    ].copy()
+
+    st.write(
+        "MIXED companies have signals that do not meet a directional "
+        "threshold. REVIEW companies have fewer than two available core "
+        "metrics."
     )
+
+    if mixed_review.empty:
+        st.info("There are no Mixed or Review companies under these settings.")
+    else:
+        st.dataframe(
+            style_table(mixed_review[display_columns(mixed_review)]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with tab_all:
     st.dataframe(
-        screen[table_columns],
+        style_table(df[display_columns(df)]),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
+
     st.download_button(
-        "Download all screened firms CSV",
-        screen.to_csv(index=False),
-        "screened_firms.csv",
-        "text/csv"
+        "Download all screening results",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="all_screening_results.csv",
+        mime="text/csv",
     )
 
-# ==================================================
-# 9. GRAPH
-# ==================================================
 
-st.header("Visual analysis")
+# --------------------------------------------------
+# Company-level explanation
+# --------------------------------------------------
 
-st.write(
-    "This plot compares gross profitability with earnings quality. "
-    "Higher GPA means more gross profit per dollar of assets; lower STA "
-    "means lower accruals under this formula. Point colours reflect the "
-    "combined screening classification."
+st.subheader("Company-Level Explanation")
+
+company_options = (
+    df.assign(
+        Company_Label=df["Ticker"].astype(str)
+        + " — "
+        + df["Name"].astype(str)
+    )
+    .sort_values("Company_Label")
 )
 
-plot_df = screen.dropna(
-    subset=["Gross_Profitability", "STA"]
-).copy()
+selected_label = st.selectbox(
+    "Choose a company",
+    company_options["Company_Label"].tolist(),
+)
 
-if not plot_df.empty:
-    fig = px.scatter(
-        plot_df,
-        x="Gross_Profitability",
-        y="STA",
-        color="Decision",
-        hover_name="Ticker",
-        hover_data=[
-            "Name", "Country", "Altman_Z", "Altman_Zone",
-            "GPA_BUY", "GPA_SELL", "STA_BUY", "STA_SELL",
-            "BUY_Signals", "SELL_Signals"
-        ],
-        title="Gross Profitability vs. Standardized Total Accruals"
+selected_row = company_options[
+    company_options["Company_Label"] == selected_label
+].iloc[0]
+
+left, right = st.columns(2)
+
+with left:
+    st.markdown(f"**{selected_row['Ticker']} — {selected_row['Name']}**")
+    st.write(f"**Screening outcome:** {selected_row['Decision']}")
+    st.write(f"**BUY signals:** {selected_row['Buy_Signals']}")
+    st.write(f"**SELL signals:** {selected_row['Sell_Signals']}")
+    st.write(
+        f"**Available core metrics:** "
+        f"{selected_row['Available_Core_Metrics']} of 3"
     )
 
-    fig.update_layout(
-        xaxis_title="GPA = Gross Profit / Total Assets",
-        yaxis_title="STA = (Net Income − Operating Cash Flow) / Total Assets",
-        legend_title="Screen classification"
+with right:
+    st.write(
+        f"**Gross profitability:** "
+        f"{format_number(selected_row['Gross_Profitability'], 4)}"
     )
+    st.write(f"**STA:** {format_number(selected_row['STA'], 4)}")
+    st.write(f"**SNOA:** {format_number(selected_row['SNOA'], 4)}")
+    st.write(f"**Altman Z-score:** {format_number(selected_row['Altman_Z'], 3)}")
 
-    st.plotly_chart(fig, use_container_width=True)
+
+# Build a transparent explanation of the selected company's signals.
+explanations = []
+
+if pd.isna(selected_row["Gross_Profitability"]):
+    explanations.append(
+        "Gross profitability is missing, so the company was not ranked "
+        "on that metric."
+    )
 else:
-    st.info("No firms have both GPA and STA available for the graph.")
-
-# ==================================================
-# 10. COMPANY DRILL-DOWN
-# ==================================================
-
-st.header("Company-level explanation")
-
-tickers = sorted(screen["Ticker"].dropna().unique().tolist())
-
-if tickers:
-    chosen_ticker = st.selectbox("Choose a company", tickers)
-    company = screen.loc[screen["Ticker"] == chosen_ticker].iloc[0]
-
-    st.subheader(f"{company['Name']} ({chosen_ticker})")
-
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Decision", company["Decision"])
-    d2.metric("BUY signals", int(company["BUY_Signals"]))
-    d3.metric("SELL signals", int(company["SELL_Signals"]))
-
-    st.write("**Why this classification?**")
-
-    explanations = []
-
-    if company["GPA_BUY"]:
-        explanations.append("GPA is in the favourable percentile.")
-    if company["GPA_SELL"]:
-        explanations.append("GPA is in the unfavourable percentile.")
-    if company["STA_BUY"]:
-        explanations.append("STA is in the favourable percentile.")
-    if company["STA_SELL"]:
-        explanations.append("STA is in the unfavourable percentile.")
-    if company["Altman_SELL"]:
-        explanations.append("Altman Z is in the distress zone.")
-
-    if pd.isna(company["Gross_Profitability"]):
-        explanations.append("GPA is missing; it cannot trigger a signal.")
-    if pd.isna(company["STA"]):
-        explanations.append("STA is missing; it cannot trigger a signal.")
-    if pd.isna(company["Altman_Z"]):
-        explanations.append("Altman Z is missing; its zone is unknown.")
-
-    if explanations:
-        for explanation in explanations:
-            st.write(f"- {explanation}")
+    if selected_row["GPA_BUY"]:
+        explanations.append(
+            "Gross profitability is within the selected top percentile "
+            "and contributes a BUY signal."
+        )
+    elif selected_row["GPA_SELL"]:
+        explanations.append(
+            "Gross profitability is within the selected bottom percentile "
+            "and contributes a SELL signal."
+        )
     else:
-        st.write(
-            "- No BUY or SELL flag was triggered by the currently implemented rules."
+        explanations.append(
+            "Gross profitability is available but is outside the selected "
+            "BUY and SELL percentile groups."
         )
 
-    details = [
-        "Ticker", "Name", "Country", "Market Cap",
-        "Gross_Profitability", "STA", "SNOA",
-        "Altman_Z", "Altman_Zone",
-        "GP_Status", "STA_Status", "SNOA_Status", "Altman_Status",
-        "GP_Fiscal_Date", "Fiscal_Date", "Altman_Fiscal_Date"
-    ]
-    details = [c for c in details if c in company.index]
+if pd.isna(selected_row["STA"]):
+    explanations.append(
+        "STA is missing, so the company was not ranked on STA."
+    )
+else:
+    if selected_row["STA_BUY"]:
+        explanations.append(
+            "STA is within the selected bottom percentile and contributes "
+            "a BUY signal."
+        )
+    elif selected_row["STA_SELL"]:
+        explanations.append(
+            "STA is within the selected top percentile and contributes "
+            "a SELL signal."
+        )
+    else:
+        explanations.append(
+            "STA is available but is outside the selected BUY and SELL "
+            "percentile groups."
+        )
 
-    st.dataframe(
-        company[details].to_frame("Value"),
-        use_container_width=True
+if pd.isna(selected_row["Altman_Z"]):
+    explanations.append(
+        "Altman Z-score is missing, so no distress or safe-zone assessment "
+        "is available."
+    )
+elif selected_row["ALTMAN_SELL"]:
+    explanations.append(
+        "Altman Z-score is below the selected distress threshold and "
+        "contributes a SELL signal."
+    )
+elif selected_row["ALTMAN_SAFE"]:
+    explanations.append(
+        "Altman Z-score is above the selected safe-zone threshold. "
+        "This is displayed as context and does not automatically add a "
+        "BUY signal."
+    )
+else:
+    explanations.append(
+        "Altman Z-score is between the selected distress and safe-zone "
+        "thresholds."
     )
 
-# ==================================================
-# 11. DATA COVERAGE
-# ==================================================
+for explanation in explanations:
+    st.markdown(f"- {explanation}")
 
-st.header("Missing-data report")
+st.markdown("**Why this screening outcome?**")
 
-coverage = []
+if selected_row["Decision"] == "POTENTIAL LONG":
+    st.success(
+        "This company meets the current Potential LONG signal rules. "
+        "The screen is a starting point for further research."
+    )
+elif selected_row["Decision"] == "POTENTIAL SHORT":
+    st.warning(
+        "This company meets the current Potential SHORT signal rules. "
+        "The screen is a starting point for further research."
+    )
+elif selected_row["Decision"] == "REVIEW":
+    st.info(
+        "There are fewer than two available core metrics, so the app "
+        "does not assign a directional screening outcome."
+    )
+elif selected_row["Decision"] == "MIXED":
+    st.info(
+        "The company has screening signals, but they do not satisfy the "
+        "current rules for a Potential LONG or Potential SHORT."
+    )
+else:
+    st.info(
+        "The company does not currently meet the selected BUY or SELL "
+        "signal thresholds."
+    )
 
-for column, label in [
-    ("Gross_Profitability", "GPA"),
-    ("STA", "STA"),
-    ("SNOA", "Existing SNOA (not required scaled NOA)"),
-    ("Altman_Z", "Altman Z")
-]:
-    valid = int(screen[column].notna().sum())
-    missing = len(screen) - valid
-    coverage.append({
-        "Metric": label,
-        "Eligible firms": valid,
-        "Missing firms": missing,
-        "Coverage (%)": round(100 * valid / len(screen), 1)
-        if len(screen) else np.nan
-    })
 
-st.dataframe(
-    pd.DataFrame(coverage),
-    use_container_width=True,
-    hide_index=True
-)
+# --------------------------------------------------
+# Methodology and limitations
+# --------------------------------------------------
 
-# ==================================================
-# 12. USER CONCLUSIONS
-# ==================================================
+with st.expander("Screening Methodology"):
+    st.markdown(
+        """
+        **1. Gross profitability**
 
-st.header("Analyst interpretation")
+        Gross profitability is calculated as gross profit divided by total
+        assets. Higher values are treated as stronger in this screen.
 
-st.text_area(
-    "Write your conclusions",
-    placeholder=(
-        "Which companies have favourable signals? Where do the metrics agree "
-        "or disagree? What are the limitations of the data and screening rules?"
-    ),
-    height=180
-)
+        **2. STA**
 
-with st.expander("Data source and methodological limitations"):
-    st.markdown("""
-    - **Data file:** `universe.csv`, prepared in Colab using `yfinance`.
-    - The current universe contains the 851 firms in the prepared company list.
-    - Missing accounting values are not silently replaced with zero.
-    - Percentile counts use floor(eligible firms × selected percentile).
-    - Metric ranks use `method='min'`; ticker provides deterministic ordering
-      when a cutoff must select among tied values.
-    - Book-to-market, the required scaled-NOA formula, sector demeaning,
-      data-pull date, and an explicit exclusion log remain to be added.
-    - Historical market equity can differ from the issuer's exact fiscal
-      year-end market value.
-    - The existing SNOA result is not assumed to equal the required
-      scaled-NOA formula.
-    """)
+        STA is calculated as net income minus operating cash flow, divided
+        by total assets. Lower values are treated as stronger in this screen.
 
+        **3. Altman Z-score**
+
+        The manufacturing version of the Altman Z-score is used. A score
+        below the selected distress threshold contributes a SELL signal.
+        A score above the safe-zone threshold is displayed as context, but
+        does not automatically create a BUY signal.
+
+        **4. Percentile screening**
+
+        The percentile controls determine how many eligible companies are
+        selected from the top or bottom of a metric. Missing observations
+        are excluded from that metric's eligible ranking; they are not
+        replaced with zero. The selected count is the floor of the number
+        of eligible firms multiplied by the selected percentile.
+
+        **5. Directional outcomes**
+
+        Potential LONG and Potential SHORT outcomes depend on the selected
+        minimum signal counts. Companies with conflicting signals are
+        labelled MIXED. Companies with fewer than two available core
+        metrics are labelled REVIEW.
+
+        **6. Candidate ranking**
+
+        The Top 10 lists include only companies classified as Potential
+        LONG or Potential SHORT under the current settings. Signal counts
+        determine the primary ranking, with metric values and ticker used
+        as tie-breakers.
+        """
+    )
+
+with st.expander("Data Coverage and Limitations"):
+    coverage_rows = []
+
+    coverage_columns = {
+        "Gross profitability": "Gross_Profitability",
+        "STA": "STA",
+        "SNOA": "SNOA",
+        "Altman Z-score": "Altman_Z",
+    }
+
+    for label, column in coverage_columns.items():
+        if column in df.columns:
+            valid_count = int(df[column].notna().sum())
+            missing_count = int(df[column].isna().sum())
+            coverage_rows.append({
+                "Metric": label,
+                "Available": valid_count,
+                "Missing": missing_count,
+                "Coverage (%)": (
+                    round(valid_count / len(df) * 100, 1)
+                    if len(df)
+                    else 0
+                ),
+            })
+
+    if coverage_rows:
+        st.dataframe(
+            pd.DataFrame(coverage_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown(
+        """
+        - The screening results depend on the data available in the
+          supplied dataset and the selected thresholds.
+        - Missing accounting data can affect which companies are eligible
+          for each metric's percentile ranking.
+        - The existing SNOA value is displayed for reference but is not
+          used to generate BUY or SELL signals in this version.
+        - This tool does not incorporate every factor relevant to an
+          investment decision, such as valuation, management quality,
+          industry-specific conditions, or future business prospects.
+        - A screening result is not a guarantee of future performance and
+          should not be treated as a stand-alone investment recommendation.
+        """
+    )
+
+st.divider()
 st.caption(
-    "Educational screening tool only. A long/short label is a rule-based "
-    "candidate classification, not a guarantee of performance."
+    "Interactive stock-screening tool for analytical and educational use."
 )
