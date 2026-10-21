@@ -552,22 +552,16 @@ def score_companies(universe):
     return result
 
 
-# Calculate the current signals before displaying any screens.
+# Critical: score after reading the current widget settings.
+# Every screen below uses this same dataframe.
 scored_data = score_companies(data)
 
 
 # ============================================================
-# INDIVIDUAL SCREEN TABLES — TOP 10 BUY AND SELL
+# INDIVIDUAL SCREEN TABLE FUNCTION
 # ============================================================
 
 def show_metric_table(data_with_signals, metric, buy_col, sell_col):
-    """
-    Display the 10 strongest BUY candidates and 10 strongest SELL
-    candidates for one metric only.
-
-    This function does not use the combined company classification.
-    Each candidate must qualify for the individual metric's signal.
-    """
     required = [metric, buy_col, sell_col]
     missing = [
         column for column in required
@@ -587,76 +581,44 @@ def show_metric_table(data_with_signals, metric, buy_col, sell_col):
 
     missing_count = int(data_with_signals[metric].isna().sum())
 
-    buy_candidates = valid[valid[buy_col].fillna(False)].copy()
-    sell_candidates = valid[valid[sell_col].fillna(False)].copy()
+    col1, col2 = st.columns(2)
+    col1.metric("Valid observations", f"{len(valid):,}")
+    col2.metric("Missing observations", f"{missing_count:,}")
 
-    # GPA and Altman Z: higher values are preferred.
-    # STA and SNOA: lower values are preferred.
-    higher_is_better = metric in [
-        "Gross_Profitability",
-        "Altman_Z",
-    ]
+    if valid.empty:
+        st.info("No valid observations are available for this screen.")
+        return
 
-    # BUY list: strongest qualifying values first.
-    buy_candidates = buy_candidates.sort_values(
+    valid["Screen Result"] = np.select(
+        [valid[buy_col], valid[sell_col]],
+        ["BUY signal", "SELL signal"],
+        default="No signal",
+    )
+
+    ascending = metric != "Gross_Profitability"
+    valid = valid.sort_values(
         metric,
-        ascending=not higher_is_better,
+        ascending=ascending,
         na_position="last",
-    ).head(10)
+    )
 
-    # SELL list: weakest qualifying values first.
-    sell_candidates = sell_candidates.sort_values(
-        metric,
-        ascending=higher_is_better,
-        na_position="last",
-    ).head(10)
-
-    # Display coverage and signal counts.
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Valid observations", f"{len(valid):,}")
-    m2.metric("Missing observations", f"{missing_count:,}")
-    m3.metric("BUY candidates", f"{int(valid[buy_col].sum()):,}")
-    m4.metric("SELL candidates", f"{int(valid[sell_col].sum()):,}")
-
-    # Build the side-by-side tables.
-    buy_col_view, sell_col_view = st.columns(2)
-
-    table_columns = [
+    columns = [
         column for column in [
             "Rank",
             "Ticker",
             "Name",
             "Market Cap",
             metric,
+            "Screen Result",
         ]
         if column in valid.columns
     ]
 
-    with buy_col_view:
-        st.subheader("Top 10 BUY")
-        st.caption("Best qualifying values for this metric.")
-
-        if buy_candidates.empty:
-            st.info("No companies currently meet this metric's BUY criteria.")
-        else:
-            st.dataframe(
-                display_table(buy_candidates, table_columns),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    with sell_col_view:
-        st.subheader("Top 10 SELL")
-        st.caption("Weakest qualifying values for this metric.")
-
-        if sell_candidates.empty:
-            st.info("No companies currently meet this metric's SELL criteria.")
-        else:
-            st.dataframe(
-                display_table(sell_candidates, table_columns),
-                use_container_width=True,
-                hide_index=True,
-            )
+    st.dataframe(
+        display_table(valid, columns),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # ============================================================
@@ -779,18 +741,34 @@ if st.session_state["distress_z"] >= st.session_state["safe_z"]:
     st.error("The distress threshold must be below the safe-zone threshold.")
     st.stop()
 
-# Show the individual top 10 BUY and SELL candidates for Altman Z.
-show_metric_table(
-    scored_data,
-    "Altman_Z",
-    "ALTMAN_BUY",
-    "ALTMAN_SELL",
-)
-
-# Keep the Altman Z distribution chart.
 z_valid = scored_data[scored_data["Altman_Z"].notna()].copy()
 
+z1, z2, z3 = st.columns(3)
+z1.metric("Valid Z-Scores", f"{len(z_valid):,}")
+z2.metric("BUY signals", f"{int(z_valid['ALTMAN_BUY'].sum()):,}")
+z3.metric("SELL signals", f"{int(z_valid['ALTMAN_SELL'].sum()):,}")
+
 if not z_valid.empty:
+    z_valid["Screen Result"] = np.select(
+        [z_valid["ALTMAN_BUY"], z_valid["ALTMAN_SELL"]],
+        ["BUY signal", "SELL signal"],
+        default="Neutral",
+    )
+
+    zcols = [
+        column for column in [
+            "Rank", "Ticker", "Name", "Market Cap",
+            "Altman_Z", "Screen Result",
+        ]
+        if column in z_valid.columns
+    ]
+
+    st.dataframe(
+        display_table(z_valid, zcols),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     fig_z = px.histogram(
         z_valid,
         x="Altman_Z",
@@ -881,9 +859,6 @@ st.slider(
     on_change=sync_setting,
     args=("min_signals", "signals_main"),
 )
-
-# Recalculate the combined classification using the latest signal setting.
-scored_data = score_companies(data)
 
 counts = (
     scored_data["Classification"]
