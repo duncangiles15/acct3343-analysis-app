@@ -12,16 +12,32 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="Stock Screening Dashboard",
+    page_title="Manufacturing Stock Screener",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("Stock Screening Dashboard")
+st.title("Manufacturing Stock Screening Dashboard")
+
+st.markdown(
+    """
+    This dashboard screens a universe of publicly traded manufacturing
+    companies using four financial measures: Altman Z-Score, accruals
+    (STA), net operating assets (SNOA), and Gross Profitability.
+
+    The objective is to compare companies using consistent financial
+    criteria, identify firms that meet the selected BUY or SELL screening
+    conditions, and explore the financial characteristics behind each result.
+
+    Results depend on the financial data in `universe.csv` and the screening
+    thresholds selected in the sidebar.
+    """
+)
+
 st.caption(
-    "A quantitative stock screener using Altman Z-Score, "
-    "Gross Profitability, accruals, and operating assets."
+    "Quantitative screening tool for financial analysis. "
+    "Classifications are rule-based and are not investment recommendations."
 )
 
 
@@ -39,7 +55,7 @@ DEFAULTS = {
     "min_signals": 2,
 }
 
-# Only sidebar widgets are used.
+# Sidebar-only widgets: no duplicate controls on the main page.
 WIDGET_KEYS = {
     "min_market_cap": ["cap_sidebar"],
     "sta_pct": ["sta_pct_sidebar"],
@@ -69,11 +85,11 @@ initialize_settings()
 
 
 # ============================================================
-# DATA HELPERS
+# DATA AND FORMATTING HELPERS
 # ============================================================
 
 def parse_market_cap(value):
-    """Convert values such as $2.4T, $850B, and $45.2M to dollars."""
+    """Convert market-cap values such as $2.4T, $850B, and $45.2M to dollars."""
     if pd.isna(value):
         return np.nan
 
@@ -121,6 +137,7 @@ def format_percent(value):
 
 
 def display_table(frame, columns):
+    """Format ratios for display while preserving the underlying numeric data."""
     result = frame[columns].copy()
 
     if "Market Cap" in result.columns:
@@ -149,15 +166,15 @@ def export_csv(frame):
 
 
 # ============================================================
-# LOAD DATA
+# LOAD STOCK UNIVERSE
 # ============================================================
 
 DATA_FILE = Path(__file__).parent / "universe.csv"
 
 if not DATA_FILE.exists():
     st.error(
-        "Could not find universe.csv. Make sure it is in the same "
-        "repository folder as app.py."
+        "Could not find universe.csv. Ensure it is in the same repository "
+        "folder as app.py."
     )
     st.stop()
 
@@ -224,7 +241,10 @@ def load_data(file_path, modified_time):
     return df
 
 
-data = load_data(str(DATA_FILE), DATA_FILE.stat().st_mtime)
+data = load_data(
+    str(DATA_FILE),
+    DATA_FILE.stat().st_mtime,
+)
 
 if data.empty:
     st.error("The stock universe is empty.")
@@ -255,7 +275,7 @@ if missing_columns:
 
 
 # ============================================================
-# SLIDER HELPERS
+# SIDEBAR SLIDER HELPERS
 # ============================================================
 
 def add_cap_slider():
@@ -269,7 +289,7 @@ def add_cap_slider():
         key=key,
         on_change=sync_setting,
         args=("min_market_cap", key),
-        help="Excludes companies below the selected market capitalization.",
+        help="Exclude companies below the selected market capitalization.",
     )
 
 
@@ -321,13 +341,13 @@ def add_signal_slider():
 
 
 # ============================================================
-# SIDEBAR — ORDERED TO MATCH DASHBOARD STEPS
+# SIDEBAR FILTERS — MATCH THE DASHBOARD STEP ORDER
 # ============================================================
 
 with st.sidebar:
     st.header("Screen Filters")
     st.caption(
-        "Adjust the filters here to update the tables and charts."
+        "Adjust the filters below to update the screening results."
     )
 
     st.subheader("Step 1 — Stock Universe")
@@ -339,7 +359,7 @@ with st.sidebar:
     add_percent_slider(
         "sta_pct",
         "STA threshold (%)",
-        "Lower STA is treated as better in this screen.",
+        "Lower STA is treated as better by this screening rule.",
     )
 
     st.divider()
@@ -348,7 +368,7 @@ with st.sidebar:
     add_percent_slider(
         "snoa_pct",
         "SNOA threshold (%)",
-        "Lower SNOA is treated as better in this screen.",
+        "Lower SNOA is treated as better by this screening rule.",
     )
 
     st.divider()
@@ -396,7 +416,7 @@ with st.sidebar:
 
 
 # ============================================================
-# APPLY MARKET CAP FILTER
+# STEP 1 — APPLY MARKET-CAP FILTER
 # ============================================================
 
 min_market_cap_dollars = st.session_state["min_market_cap"] * 1e9
@@ -411,7 +431,7 @@ filtered_data = data[
 
 
 # ============================================================
-# CALCULATE SIGNALS
+# CALCULATE INDIVIDUAL SIGNALS AND COMBINED CLASSIFICATION
 # ============================================================
 
 def score_companies(universe):
@@ -425,7 +445,7 @@ def score_companies(universe):
     distress_z = st.session_state["distress_z"]
     min_signals = st.session_state["min_signals"]
 
-    # Step 2: STA — lower is treated as better.
+    # STA: lower values are treated as better.
     scored["STA_BUY"] = (
         scored["STA"].notna()
         & (scored["STA"] <= -sta_threshold)
@@ -435,7 +455,7 @@ def score_companies(universe):
         & (scored["STA"] >= sta_threshold)
     )
 
-    # Step 3: SNOA — lower is treated as better.
+    # SNOA: lower values are treated as better.
     scored["SNOA_BUY"] = (
         scored["SNOA"].notna()
         & (scored["SNOA"] <= -snoa_threshold)
@@ -445,7 +465,7 @@ def score_companies(universe):
         & (scored["SNOA"] >= snoa_threshold)
     )
 
-    # Step 4: Altman Z-Score — higher is treated as better.
+    # Altman Z-Score: higher scores are treated as better.
     scored["Z_BUY"] = (
         scored["Altman_Z"].notna()
         & (scored["Altman_Z"] >= safe_z)
@@ -455,7 +475,7 @@ def score_companies(universe):
         & (scored["Altman_Z"] <= distress_z)
     )
 
-    # Step 5: Gross Profitability — higher is treated as better.
+    # Gross Profitability: higher values are treated as better.
     scored["GPA_BUY"] = (
         scored["Gross_Profitability"].notna()
         & (scored["Gross_Profitability"] >= gpa_threshold)
@@ -471,6 +491,7 @@ def score_companies(universe):
         "Z_BUY",
         "GPA_BUY",
     ]
+
     sell_columns = [
         "STA_SELL",
         "SNOA_SELL",
@@ -485,8 +506,6 @@ def score_companies(universe):
         ["STA", "SNOA", "Altman_Z", "Gross_Profitability"]
     ].notna().sum(axis=1)
 
-    # Companies with BUY and SELL signals are classified as NEUTRAL
-    # to avoid contradictory combined classifications.
     scored["Combined_Result"] = np.select(
         [
             (
@@ -532,6 +551,7 @@ def show_metric_table(frame, metric, buy_col, sell_col):
         ascending=not higher_is_better,
         na_position="last",
     )
+
     sell = sell.sort_values(
         metric,
         ascending=higher_is_better,
@@ -568,6 +588,7 @@ def show_metric_table(frame, metric, buy_col, sell_col):
                 use_container_width=True,
                 hide_index=True,
             )
+
             st.download_button(
                 "Download BUY candidates",
                 data=export_csv(buy),
@@ -585,6 +606,7 @@ def show_metric_table(frame, metric, buy_col, sell_col):
                 use_container_width=True,
                 hide_index=True,
             )
+
             st.download_button(
                 "Download SELL candidates",
                 data=export_csv(sell),
@@ -648,16 +670,27 @@ def show_coverage(frame):
 
 
 # ============================================================
-# STEP 1 — STOCK UNIVERSE
+# STEP 1 — STOCK UNIVERSE OVERVIEW
 # ============================================================
 
 st.divider()
-st.header("Step 1 — Stock Universe")
+st.header("Step 1 — Manufacturing Stock Universe")
+
+st.markdown(
+    """
+    The screening process begins with the companies included in the
+    dataset. The minimum market-cap filter determines which companies
+    remain in the active universe.
+
+    Financial data availability varies by metric, so the number of
+    companies assessed may differ across individual screens.
+    """
+)
 
 m1, m2, m3, m4 = st.columns(4)
 
-m1.metric("Total companies", f"{len(data):,}")
-m2.metric("After market-cap filter", f"{len(scored_data):,}")
+m1.metric("Companies in dataset", f"{len(data):,}")
+m2.metric("Companies in active universe", f"{len(scored_data):,}")
 m3.metric(
     "Combined BUY",
     f"{int((scored_data['Combined_Result'] == 'BUY').sum()):,}",
@@ -667,7 +700,7 @@ m4.metric(
     f"{int((scored_data['Combined_Result'] == 'SELL').sum()):,}",
 )
 
-with st.expander("View stock universe"):
+with st.expander("View active stock universe"):
     universe_columns = [
         column for column in [
             "Rank",
@@ -696,11 +729,13 @@ st.header("Step 2 — STA (Accruals)")
 
 st.markdown(
     """
-    **Definition:** STA = (Net Income − Operating Cash Flow) / Total Assets.
+    **Purpose:** STA measures accruals relative to a company's asset base.
 
-    Lower STA is treated as better in this screen. Values at or below the
-    negative threshold can qualify as BUY signals; values at or above the
-    positive threshold can qualify as SELL signals.
+    **Calculation:** (Net Income − Operating Cash Flow) / Total Assets.
+
+    In this screen, lower STA values are treated as more favourable.
+    Companies at or below the negative threshold receive a BUY signal,
+    while companies at or above the positive threshold receive a SELL signal.
     """
 )
 
@@ -721,10 +756,13 @@ st.header("Step 3 — SNOA (Net Operating Assets)")
 
 st.markdown(
     """
-    **Definition:** SNOA = (Operating Assets − Operating Liabilities) /
-    Total Assets.
+    **Purpose:** SNOA measures net operating assets relative to total assets.
 
-    Lower SNOA is treated as better in this screen.
+    **Calculation:** (Operating Assets − Operating Liabilities) / Total Assets.
+
+    Lower SNOA values are treated as more favourable under this screening
+    rule. The sidebar threshold determines which values qualify for BUY
+    or SELL signals.
     """
 )
 
@@ -745,13 +783,15 @@ st.header("Step 4 — Altman Z-Score")
 
 st.markdown(
     """
-    The manufacturing Altman Z-Score uses working capital, retained
-    earnings, EBIT, market equity relative to liabilities, and sales
-    relative to assets. Higher scores generally indicate a stronger
-    financial position under this model.
+    **Purpose:** The Altman Z-Score combines financial ratios to assess
+    a manufacturing company's financial condition and potential distress risk.
 
-    Traditional reference points are 2.99 for the safe zone and 1.81
-    for the distress zone. Adjust these in the sidebar.
+    The manufacturing model uses working capital, retained earnings, EBIT,
+    market equity relative to total liabilities, and sales relative to assets.
+
+    Traditional reference points are 2.99 for the safe zone and 1.81 for
+    the distress zone. The sidebar lets you adjust the thresholds used to
+    generate the dashboard's BUY and SELL signals.
     """
 )
 
@@ -769,7 +809,10 @@ if not z_values.empty:
         x=z_values,
         nbins=40,
         title="Distribution of Altman Z-Scores",
-        labels={"x": "Altman Z-Score", "count": "Companies"},
+        labels={
+            "x": "Altman Z-Score",
+            "count": "Companies",
+        },
     )
 
     fig_z.add_vline(
@@ -777,6 +820,7 @@ if not z_values.empty:
         line_dash="dash",
         annotation_text="Safe threshold",
     )
+
     fig_z.add_vline(
         x=st.session_state["distress_z"],
         line_dash="dash",
@@ -795,11 +839,14 @@ st.header("Step 5 — Gross Profitability")
 
 st.markdown(
     """
-    **Definition:** Gross Profitability = Gross Profit / Total Assets.
+    **Purpose:** Gross Profitability measures gross profit relative to
+    the company's asset base.
 
-    Higher Gross Profitability is treated as better. The minimum BUY
-    threshold is controlled by the sidebar slider. Negative values qualify
-    as SELL signals in this screening rule.
+    **Calculation:** Gross Profit / Total Assets.
+
+    Higher values indicate more gross profit generated per dollar of assets.
+    Companies meeting the selected minimum threshold receive a BUY signal;
+    negative values receive a SELL signal under this screen's rules.
     """
 )
 
@@ -817,7 +864,10 @@ if not gpa_values.empty:
         x=gpa_values * 100,
         nbins=40,
         title="Distribution of Gross Profitability",
-        labels={"x": "Gross Profitability (%)", "count": "Companies"},
+        labels={
+            "x": "Gross Profitability (%)",
+            "count": "Companies",
+        },
     )
 
     fig_gpa.add_vline(
@@ -838,13 +888,19 @@ st.header("Step 6 — Combined Screening Results")
 
 st.markdown(
     """
-    Each company can receive four individual BUY signals and four individual
-    SELL signals: STA, SNOA, Altman Z-Score, and Gross Profitability.
+    The combined screen brings together the four individual metrics to
+    identify companies that meet multiple screening criteria.
 
-    A combined BUY requires the selected minimum number of BUY signals and
-    no SELL signals. A combined SELL requires the selected minimum number
-    of SELL signals and no BUY signals. Companies that do not meet either
-    rule are classified as NEUTRAL.
+    Each company can receive up to four BUY signals and four SELL signals,
+    with one possible signal in each direction from each metric. The
+    minimum signal count is adjustable in the sidebar.
+
+    - **BUY:** Meets the minimum BUY-signal requirement and has no SELL signals.
+    - **SELL:** Meets the minimum SELL-signal requirement and has no BUY signals.
+    - **NEUTRAL:** Does not meet either combined classification rule.
+
+    These labels represent the dashboard's screening methodology, not a
+    prediction of future returns or a standalone investment decision.
     """
 )
 
@@ -863,7 +919,10 @@ fig_results = px.bar(
     x=result_counts.index,
     y=result_counts.values,
     title="Companies by Combined Classification",
-    labels={"x": "Classification", "y": "Number of companies"},
+    labels={
+        "x": "Classification",
+        "y": "Number of companies",
+    },
 )
 
 st.plotly_chart(fig_results, use_container_width=True)
@@ -922,6 +981,16 @@ st.download_button(
 
 st.divider()
 st.header("Step 7 — Top 10 BUY and SELL")
+
+st.markdown(
+    """
+    These lists highlight companies that meet the combined screening rules.
+    They are sorted by signal count and selected financial metrics to make
+    the results easier to review. The ranking is specific to this screening
+    methodology and should not be interpreted as a comprehensive investment
+    ranking.
+    """
+)
 
 buy_candidates = scored_data[
     scored_data["Combined_Result"] == "BUY"
@@ -1007,6 +1076,13 @@ with sell_tab:
 st.divider()
 st.header("Company Explorer")
 
+st.markdown(
+    """
+    Select an individual company to review its available metric values,
+    individual screening signals, and combined classification.
+    """
+)
+
 company_options = scored_data.copy()
 
 company_options["_label"] = (
@@ -1039,8 +1115,14 @@ if not company_options.empty:
         "Gross Profitability",
         format_percent(company.get("Gross_Profitability", np.nan)),
     )
-    c3.metric("STA", format_percent(company.get("STA", np.nan)))
-    c4.metric("SNOA", format_percent(company.get("SNOA", np.nan)))
+    c3.metric(
+        "STA",
+        format_percent(company.get("STA", np.nan)),
+    )
+    c4.metric(
+        "SNOA",
+        format_percent(company.get("SNOA", np.nan)),
+    )
 
     c5, c6, c7 = st.columns(3)
 
@@ -1053,7 +1135,10 @@ if not company_options.empty:
     c6.metric("BUY signals", int(company["BUY_Signals"]))
     c7.metric("SELL signals", int(company["SELL_Signals"]))
 
-    st.write("**Combined classification:**", company["Combined_Result"])
+    st.write(
+        "**Combined classification:**",
+        company["Combined_Result"],
+    )
 
     detail = pd.DataFrame(
         {
@@ -1105,67 +1190,94 @@ if not company_options.empty:
 
 
 # ============================================================
-# METHODOLOGY AND COVERAGE
+# METHODOLOGY, COVERAGE, AND LIMITATIONS
 # ============================================================
 
 st.divider()
 st.header("Methodology and Data Coverage")
 
-with st.expander("Metric definitions"):
+with st.expander("Metric definitions and screening rules"):
     st.markdown(
         """
-        **Altman Z-Score (manufacturing model)**
+        **Altman Z-Score — Manufacturing model**
 
-        - 1.2 × working capital / total assets
-        - 1.4 × retained earnings / total assets
-        - 3.3 × EBIT / total assets
-        - 0.6 × market equity / total liabilities
-        - 1.0 × sales / total assets
+        The manufacturing model combines five financial ratios:
 
-        The app uses the supplied Altman Z-Score values.
+        - 1.2 × Working Capital / Total Assets
+        - 1.4 × Retained Earnings / Total Assets
+        - 3.3 × EBIT / Total Assets
+        - 0.6 × Market Equity / Total Liabilities
+        - 1.0 × Sales / Total Assets
 
-        **STA**
+        The dashboard uses the Altman Z-Score values supplied in the dataset.
+        The traditional reference points are 2.99 for the safe zone and 1.81
+        for the distress zone; the sidebar thresholds determine the signals
+        actually used by this dashboard.
+
+        **STA — Accruals**
 
         (Net Income − Operating Cash Flow) / Total Assets.
 
-        **SNOA**
+        Lower values are treated as more favourable by this screening rule.
+
+        **SNOA — Net Operating Assets**
 
         (Operating Assets − Operating Liabilities) / Total Assets.
+
+        Lower values are treated as more favourable by this screening rule.
 
         **Gross Profitability**
 
         Gross Profit / Total Assets.
 
+        Higher values are treated as more favourable by this screening rule.
+
         **Combined classification**
 
-        A company must meet the selected minimum signal count in one
-        direction and have zero signals in the opposite direction to
-        receive a combined BUY or SELL classification.
+        A company must meet the selected minimum number of BUY or SELL signals
+        and have no signals in the opposite direction to receive that
+        combined classification. All other companies are classified as
+        NEUTRAL.
         """
     )
 
 with st.expander("Data coverage and missing values"):
-    st.write(
-        "Coverage below reflects the current market-cap-filtered universe. "
-        "Missing metric values are excluded from that metric's individual "
-        "screen."
-    )
-    show_coverage(filtered_data)
-
-with st.expander("Screening limitations"):
     st.markdown(
         """
-        - These quantitative screens do not guarantee future performance.
-        - Thresholds are configurable and materially affect classifications.
+        Coverage is reported for the active universe after applying the
+        market-cap filter. Companies with missing values are excluded from
+        the relevant individual metric screen.
+
+        The number of companies assessed may differ across metrics because
+        financial data availability varies. Market capitalization and
+        financial figures may also refer to different dates.
+        """
+    )
+
+    show_coverage(filtered_data)
+
+with st.expander("Interpretation and limitations"):
+    st.markdown(
+        """
+        This dashboard is a quantitative screening tool, not a complete
+        valuation model or a comprehensive assessment of a company's
+        investment merits.
+
+        - Results depend on the selected thresholds.
+        - Historical financial data may not reflect current conditions.
+        - Accounting differences and unusual events can affect ratios.
+        - Altman Z-Score thresholds are model-specific and should be
+          interpreted in the context of manufacturing companies.
+        - STA and SNOA screening directions are methodological choices and
+          should be considered alongside other financial information.
         - Missing or outdated financial data may affect results.
-        - Altman Z-Score may be less suitable for some industries.
-        - The BUY and SELL directions for STA and SNOA are screening choices
-          that should be evaluated alongside other financial information.
-        - Market-cap and financial data may reflect different dates.
-        - A screen result is not personalized investment advice.
+        - A BUY or SELL classification does not guarantee future performance
+          and should not be used in isolation.
         """
     )
 
 st.caption(
-    "Results depend on the data in universe.csv and the selected sidebar filters."
+    "Screening results are generated from universe.csv using the "
+    "selected sidebar filters. Review the methodology and data coverage "
+    "before interpreting classifications."
 )
