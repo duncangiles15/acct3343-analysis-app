@@ -1183,7 +1183,7 @@ with st.expander(
         capitalization is below the selected value.
 
         Market capitalization is converted to numeric dollars for filtering.
-        For example, '$850B' becomes 850 billion dollars and '$2.4T' becomes
+        For example, '850B' becomes 850 billion dollars, and '$2.4T' becomes
         2.4 trillion dollars. Companies with missing or unparseable market
         capitalization cannot pass this initial eligibility step.
         """
